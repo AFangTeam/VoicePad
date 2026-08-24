@@ -405,7 +405,10 @@ function fft(re, im, inverse) {
   if (inverse) for (let i = 0; i < n; i++) { re[i] /= n; im[i] /= n; }
 }
 
-/** 用 ffmpeg 解出一段双声道 f32 裸 PCM。-vn 很关键，不然会白解一遍 4K 画面 */
+/**
+ * 用 ffmpeg 解出一段双声道 f32 裸 PCM。
+ * 只 map 音轨，画面不会被解码（-vn 是保险，实测加不加同样快）。
+ */
 function decodePCM(input, { rate, start = 0, dur, filter }) {
   return new Promise((ok, fail) => {
     const args = ['-v', 'error', '-nostdin'];
@@ -425,8 +428,10 @@ function decodePCM(input, { rate, start = 0, dur, filter }) {
       if (code !== 0) return fail(new Error(err.trim().split('\n').pop() || '解码失败'));
       const buf = Buffer.concat(chunks);
       const f32 = new Float32Array(buf.buffer, buf.byteOffset, Math.floor(buf.length / 4));
+      // 保持 Float32：一趟 5 分钟的粗扫是 240 万个采样，
+      // 存成 Float64 白白多吃 19MB。FFT 那步反正要另开 Float64 缓冲
       const n = Math.floor(f32.length / 2);
-      const L = new Float64Array(n), R = new Float64Array(n);
+      const L = new Float32Array(n), R = new Float32Array(n);
       for (let i = 0; i < n; i++) { L[i] = f32[2 * i]; R[i] = f32[2 * i + 1]; }
       ok({ L, R, n, rate });
     });
@@ -438,13 +443,16 @@ function decodePCM(input, { rate, start = 0, dur, filter }) {
 function bestWindow(L, R, rate, winSec) {
   const win = Math.min(L.length, Math.round(winSec * rate));
   if (L.length <= win) return { start: 0, len: L.length };
+  // 滑动窗口累加，不建前缀和数组 —— 前缀和要两条和输入等长的 Float64，
+  // 5 分钟素材就是 38MB，纯属为了省几行代码而多花的内存
   const step = Math.round(rate * 0.5);
-  const cum = (a) => { const c = new Float64Array(a.length + 1);
-    for (let i = 0; i < a.length; i++) c[i + 1] = c[i] + a[i] * a[i]; return c; };
-  const cl = cum(L), cr = cum(R);
-  let best = 0, bestScore = -1;
-  for (let s = 0; s + win <= L.length; s += step) {
-    const score = Math.min(cl[s + win] - cl[s], cr[s + win] - cr[s]);
+  let el = 0, er = 0;
+  for (let i = 0; i < win; i++) { el += L[i] * L[i]; er += R[i] * R[i]; }
+  let best = 0, bestScore = Math.min(el, er);
+  for (let s = step; s + win <= L.length; s += step) {
+    for (let i = s - step; i < s; i++) { el -= L[i] * L[i]; er -= R[i] * R[i]; }
+    for (let i = s + win - step; i < s + win; i++) { el += L[i] * L[i]; er += R[i] * R[i]; }
+    const score = Math.min(el, er);
     if (score > bestScore) { bestScore = score; best = s; }
   }
   return { start: best, len: win };

@@ -681,10 +681,10 @@ function syncAlignUI() {
  * 拖进来的素材只是浏览器里的 File，服务端够不着，得先传上去；
  * 传完把路径记在素材上，导出时就不用再传一遍。
  */
-async function serverPath(f) {
-  if (f.path) return f.path;
-  if (f.serverPath) return f.serverPath;
-  $('alignNote').textContent = `上传 ${f.name} 以供分析…`;
+async function serverPath(f, onNote = (m) => { $('alignNote').textContent = m; }) {
+  if (f.path) return f.path;                 // 磁盘上的素材，服务端直接读
+  if (f.serverPath) return f.serverPath;     // 传过一次就别再传 —— 4K 素材动辄几百 MB
+  onNote(`上传 ${f.name}…`);
   const res = await fetch('/api/upload', {
     method: 'POST',
     headers: { 'X-Filename': encodeURIComponent(f.name), 'Content-Type': 'application/octet-stream' },
@@ -1127,25 +1127,19 @@ $('exportBtn').addEventListener('click', async () => {
                       name: f.name, filter: filterFor(i) });
         continue;
       }
-      $('progressText').textContent = `上传 ${f.name}（${k + 1}/${chosen.length}）`;
+      const el = badgeEl(i);
+      const cached = !!f.serverPath;           // 自动对轨时已经传过
+      $('progressText').textContent = cached
+        ? `准备 ${f.name}（${k + 1}/${chosen.length}）`
+        : `上传 ${f.name}（${k + 1}/${chosen.length}）`;
       $('progressText').classList.add('uploading');
       $('progressFill').style.width = `${(k / chosen.length) * 100}%`;
-      const el = badgeEl(i);
-      if (el) { el.className = 'cell-badge busy'; el.textContent = '上传中'; }
+      if (el) { el.className = 'cell-badge busy'; el.textContent = cached ? '待传' : '上传中'; }
 
-      const res = await fetch('/api/upload', {
-        method: 'POST',
-        headers: {
-          'X-Filename': encodeURIComponent(f.name),
-          'Content-Type': 'application/octet-stream',
-        },
-        body: f.file,
-        duplex: 'half',
-      });
-      const info = await res.json();
-      if (!res.ok) throw new Error(info.error || '上传失败');
+      // 自动对轨已经传过的话这里是直接复用，不会再传一遍
+      const path = await serverPath(f, (m) => { $('progressText').textContent = m; });
       picked.push({
-        index: i, path: info.path, duration: info.duration ?? f.duration,
+        index: i, path, duration: f.duration,
         name: f.name, uploaded: true, filter: filterFor(i),
       });
       if (el) { el.className = 'cell-badge busy'; el.textContent = '待传'; }
@@ -1205,6 +1199,9 @@ $('exportBtn').addEventListener('click', async () => {
         const el = stateEl(real); if (el) { el.className = 'cell-badge err'; el.textContent = '失败'; }
         toast(msg.message);
       } else if (msg.type === 'all-done') {
+        // 服务端导完就把暂存文件删了，缓存的路径已经失效 ——
+        // 不清掉的话，下次自动对轨会拿着一个不存在的路径去分析
+        for (const pk of picked) if (pk.uploaded) delete state.files[pk.index]?.serverPath;
         $('progressText').textContent = '完成';
         const where = picked.some((p) => p.uploaded)
           ? '已存到「影片 / VoicePad」'
