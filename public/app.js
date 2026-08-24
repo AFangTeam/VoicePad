@@ -707,7 +707,8 @@ async function autoAlign() {
   $('alignNote').textContent = '分析中…';
   try {
     const path = await serverPath(f);
-    const r = await fetch(`/api/align?path=${encodeURIComponent(path)}`).then((x) => x.json());
+    const q = new URLSearchParams({ path, dur: String(f.duration || 0) });
+    const r = await fetch(`/api/align?${q}`).then((x) => x.json());
     if (r.error) throw new Error(r.error);
 
     const strength = Math.abs(r.correlation);
@@ -734,6 +735,85 @@ async function autoAlign() {
     btn.classList.remove('busy');
   }
 }
+
+
+// ── 批量自动对轨 ────────────────────────────────────────────
+//
+// ## 为什么"验"比"搜"划算
+//
+// 同一次拍摄的一批素材，两条声道的时间差是**同一个物理量**（麦距 + 无线链路
+// 延迟），不会一条一条变。所以只有第一条需要真正在 ±500ms 里搜，其余的只要
+// 拿着这个偏移量去核对：峰还在不在那儿。核对不用 FFT，只是在假设点附近
+// ±3ms 做直接相关。
+//
+// 但要说实话：**这省的不是大头**。实测单条素材的代价里，开容器解析索引占
+// 绝大部分（833MB 的 4K 素材 32ms，解码只要几毫秒），搜和验都得先开文件。
+// 真正让批量对轨变得可行的是"一次开文件拿两种采样率"那一步。
+// 核对省下的是 FFT 那几十毫秒，以及 —— 更要紧的 —— 它给出一个诚实的判据：
+// 对不上就退回全搜，绝不硬套。
+
+const ALIGN_MIN_CORR = 0.15;      // 相关度低于这个值不自动应用
+let autoAlignRun = 0;             // 换素材就作废上一轮，避免结果落到新列表上
+
+async function alignOne(f, hint) {
+  const q = new URLSearchParams({ path: f.path, dur: String(f.duration || 0) });
+  if (hint) { q.set('hint', String(hint.ms)); q.set('sign', String(hint.sign)); }
+  const r = await fetch(`/api/align?${q}`).then((x) => x.json());
+  if (r.error) throw new Error(r.error);
+  return r;
+}
+
+/** 结果够不够格自动落到素材上 */
+const trustworthy = (r) =>
+  Math.abs(r.correlation) >= ALIGN_MIN_CORR &&
+  (r.mode === 'verify' ? r.agreed : r.segments >= 2);
+
+async function autoAlignAll() {
+  if (!$('autoAlign').checked) return;
+  // 只处理磁盘上的素材。拖进来的要先整片上传（几百 MB），不该在导入时静默发生
+  const targets = state.files.map((f, i) => ({ f, i })).filter(({ f }) => f.path);
+  if (targets.length < 1) return;
+
+  const run = ++autoAlignRun;
+  let hint = null, applied = 0, skipped = 0;
+  $('alignNote').textContent = `自动对轨 0/${targets.length}…`;
+
+  for (let k = 0; k < targets.length; k++) {
+    if (run !== autoAlignRun) return;                 // 用户已经换了素材
+    const { f, i } = targets[k];
+    try {
+      let r = await alignOne(f, hint);
+      // 核对没通过就退回全搜；全搜的结果同时更新假设（可能换机位了）
+      if (hint && !r.agreed) r = await alignOne(f, null);
+
+      if (trustworthy(r)) {
+        const ms = quantizeAlign(r.ms);
+        f.params = { ...(f.params || snapshotParams()), align: ms };
+        f.autoAligned = true;
+        if (r.mode !== 'verify') hint = { ms: r.ms, sign: r.sign };
+        else if (!hint) hint = { ms: r.ms, sign: r.sign };
+        if (i === state.current) { state.align = ms; ensureAudio(); render(); }
+        applied++;
+      } else {
+        skipped++;
+      }
+    } catch { skipped++; }
+    $('alignNote').textContent = `自动对轨 ${k + 1}/${targets.length}…`;
+  }
+
+  if (run !== autoAlignRun) return;
+  renderClips();
+  $('alignNote').textContent = skipped
+    ? `自动对轨：${applied} 条已应用，${skipped} 条相关度不足未动`
+    : `自动对轨完成，${applied} 条`;
+  if (applied) toast(`已自动对轨 ${applied} 条素材`);
+}
+
+$('autoAlign').addEventListener('change', (e) => {
+  localStorage.setItem('voicepad.autoAlign', e.target.checked ? '1' : '0');
+  if (e.target.checked) autoAlignAll();
+});
+if (localStorage.getItem('voicepad.autoAlign') === '0') $('autoAlign').checked = false;
 
 $('alignBtn').addEventListener('click', autoAlign);
 
@@ -1069,6 +1149,7 @@ $('picker').addEventListener('submit', async (e) => {
     renderClips();
     open(0);
     localStorage.setItem('voicepad.dir', dir);
+    autoAlignAll();                     // 后台跑，不挡用户操作
   } catch (err) {
     toast(err.message || '打开失败');
   }

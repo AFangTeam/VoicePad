@@ -959,3 +959,9 @@ input[type=range]:active::-webkit-slider-thumb { cursor: grabbing; transform: sc
 
 /* 双声道监听时对轨也不生效 —— 监听走的是原始双轨旁路 */
 .panel.monitoring .align { opacity: .45; }
+
+.align-auto {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 11.5px; color: #8a939f; cursor: pointer;
+}
+.align-auto-hint { color: #545c67; font-size: 10.5px; }

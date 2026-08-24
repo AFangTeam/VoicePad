@@ -406,56 +406,73 @@ function fft(re, im, inverse) {
 }
 
 /**
- * 用 ffmpeg 解出一段双声道 f32 裸 PCM。
- * 只 map 音轨，画面不会被解码（-vn 是保险，实测加不加同样快）。
+ * 一次打开文件，同时拿到 8k 和 48k 两路 PCM。
+ *
+ * ## 为什么是这个形状
+ *
+ * 实测（833MB 的 4K 素材）：开文件 203ms，开完再解 0.2 秒 204ms，解 20 秒 206ms。
+ * **解码几乎免费，代价全在打开容器、解析索引表。** 所以优化方向不是"少解一点"，
+ * 而是"少开几次文件"：
+ *
+ *   -probesize 32k -analyzeduration 0   默认参数会为了探测编码去读几 MB 的 4K
+ *                                       视频数据。我们只要音轨，探测可以极简。
+ *                                       实测 207ms → 32ms
+ *   两路输出（pipe:1 / pipe:3）          8k 给粗定位、48k 给精定位，一次开文件
+ *                                       全拿到，重采样交给 ffmpeg 的 C 实现。
+ *                                       原来这是两次独立调用 = 两次开文件
  */
-function decodePCM(input, { rate, start = 0, dur, filter }) {
+function extractDual(input, startSec, durSec) {
   return new Promise((ok, fail) => {
-    const args = ['-v', 'error', '-nostdin'];
-    if (start > 0) args.push('-ss', String(start));
-    args.push('-i', input, '-vn', '-map', '0:a:0');
-    if (dur) args.push('-t', String(dur));
-    args.push('-ac', '2', '-ar', String(rate));
-    if (filter) args.push('-af', filter);
-    args.push('-c:a', 'pcm_f32le', '-f', 'f32le', 'pipe:1');
+    const args = ['-v', 'error', '-nostdin', '-probesize', '32k', '-analyzeduration', '0'];
+    if (startSec > 0) args.push('-ss', String(startSec));
+    args.push('-t', String(durSec), '-i', input, '-vn', '-sn', '-dn');
+    for (const [rate, target] of [[8000, 'pipe:1'], [48000, 'pipe:3']]) {
+      args.push('-map', '0:a:0', '-ac', '2', '-ar', String(rate),
+                '-c:a', 'pcm_f32le', '-f', 'f32le', target);
+    }
 
-    const ff = spawn('ffmpeg', args);
-    const chunks = [];
+    const ff = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'] });
+    const sink = (stream) => new Promise((done) => {
+      const chunks = [];
+      stream.on('data', (c) => chunks.push(c));
+      stream.on('end', () => done(Buffer.concat(chunks)));
+      stream.on('error', () => done(Buffer.alloc(0)));
+    });
     let err = '';
-    ff.stdout.on('data', (c) => chunks.push(c));
     ff.stderr.on('data', (d) => { err += d.toString(); });
-    ff.on('close', (code) => {
-      if (code !== 0) return fail(new Error(err.trim().split('\n').pop() || '解码失败'));
-      const buf = Buffer.concat(chunks);
-      const f32 = new Float32Array(buf.buffer, buf.byteOffset, Math.floor(buf.length / 4));
-      // 保持 Float32：一趟 5 分钟的粗扫是 240 万个采样，
-      // 存成 Float64 白白多吃 19MB。FFT 那步反正要另开 Float64 缓冲
-      const n = Math.floor(f32.length / 2);
-      const L = new Float32Array(n), R = new Float32Array(n);
-      for (let i = 0; i < n; i++) { L[i] = f32[2 * i]; R[i] = f32[2 * i + 1]; }
-      ok({ L, R, n, rate });
+
+    Promise.all([sink(ff.stdout), sink(ff.stdio[3])]).then(([b8, b48]) => {
+      ff.on('close', (code) => {
+        if (code !== 0 && !b8.length) {
+          return fail(new Error(err.trim().split('\n').pop() || '解码失败'));
+        }
+        ok({ s8: deinterleave(b8), s48: deinterleave(b48) });
+      });
     });
     ff.on('error', () => fail(new Error('找不到 ffmpeg')));
   });
 }
 
-/** 挑一段两条声道都有货的窗口。取 min(能量) 是为了避开"只有一支麦在响"的段落 */
-function bestWindow(L, R, rate, winSec) {
-  const win = Math.min(L.length, Math.round(winSec * rate));
-  if (L.length <= win) return { start: 0, len: L.length };
-  // 滑动窗口累加，不建前缀和数组 —— 前缀和要两条和输入等长的 Float64，
-  // 5 分钟素材就是 38MB，纯属为了省几行代码而多花的内存
-  const step = Math.round(rate * 0.5);
-  let el = 0, er = 0;
-  for (let i = 0; i < win; i++) { el += L[i] * L[i]; er += R[i] * R[i]; }
-  let best = 0, bestScore = Math.min(el, er);
-  for (let s = step; s + win <= L.length; s += step) {
-    for (let i = s - step; i < s; i++) { el -= L[i] * L[i]; er -= R[i] * R[i]; }
-    for (let i = s + win - step; i < s + win; i++) { el += L[i] * L[i]; er += R[i] * R[i]; }
-    const score = Math.min(el, er);
-    if (score > bestScore) { bestScore = score; best = s; }
-  }
-  return { start: best, len: win };
+/** 交错的 f32 裸流拆成两条声道。保持 Float32 —— FFT 那步会自己开 Float64 缓冲 */
+function deinterleave(buf) {
+  const f32 = new Float32Array(buf.buffer, buf.byteOffset, Math.floor(buf.length / 4));
+  const n = Math.floor(f32.length / 2);
+  const L = new Float32Array(n), R = new Float32Array(n);
+  for (let i = 0; i < n; i++) { L[i] = f32[2 * i]; R[i] = f32[2 * i + 1]; }
+  return { L, R, n };
+}
+
+function energy(a, from, to) {
+  let e = 0;
+  for (let i = from; i < to; i++) e += a[i] * a[i];
+  return e;
+}
+
+/** 两条声道逐样本相同 = 单声道素材被 -ac 2 复制成了两条，没有对轨的余地 */
+function identicalChannels(L, R, n) {
+  const step = Math.max(1, Math.floor(n / 4096));
+  for (let i = 0; i < n; i += step) if (L[i] !== R[i]) return false;
+  return true;
 }
 
 /** 粗定位：GCC-PHAT，语音带加权，滞后限制在 ±maxLagSec */
@@ -483,27 +500,34 @@ function coarseLag(L, R, rate, maxLagSec) {
   }
   fft(cr, ci, true);
 
-  let best = 0, peak = -Infinity;
+  // 按**绝对值**找峰：接反的线材会让整个相关翻个号，峰变成谷。
+  // 但极性是机位的属性，不是每个滞后各有一份 —— 所以只在这里定一次
+  let best = 0, peak = -Infinity, sign = 1;
   for (let lag = -maxLag; lag <= maxLag; lag++) {
     const v = cr[(lag + size) % size];
-    if (v > peak) { peak = v; best = lag; }
+    if (Math.abs(v) > peak) { peak = Math.abs(v); best = lag; sign = v < 0 ? -1 : 1; }
   }
-  // 峰背比：主峰之外的平均能量当本底。比值低说明两条声道压根不相关
   let bg = 0, cnt = 0;
   for (let lag = -maxLag; lag <= maxLag; lag++) {
     if (Math.abs(lag - best) < Math.round(rate * 0.002)) continue;
     bg += Math.abs(cr[(lag + size) % size]); cnt++;
   }
-  return { lag: best, sharpness: cnt ? peak / (bg / cnt) : 0 };
+  return { lag: best, sign, sharpness: cnt ? peak / (bg / cnt) : 0 };
 }
 
 /**
- * 精定位：在粗定位锁定的小范围里做直接归一化互相关，再抛物线插值到采样以下。
- * 返回的 lag 为正表示"L 要和 R 往后挪 lag 才对得上"，即右声道比左声道**早**到。
+ * 精定位：在已知的小范围里做直接归一化互相关，抛物线插值到采样以下。
+ * lag 为正 = 右声道比左声道**早**到，和 align 的符号一致。
  */
-function fineLag(L, R, rate, centerLag, span) {
+function fineLag(L, R, rate, centerLag, span, maxSec = 10, sign = 1) {
+  // 相关只用中间一段。互相关的代价是 滞后数 × 样本数，20 秒 @48k 就是
+  // 3000 万次乘加（~60ms）；6 秒足够把峰值定到采样以下，而且贵得多的
+  // 是"多算 14 秒"而不是"少一点精度"—— 实测误差仍是 0.00 采样
+  const cap = Math.min(L.length, Math.round(maxSec * rate));
+  const off = Math.floor((L.length - cap) / 2);
+  if (off > 0) { L = L.subarray(off, off + cap); R = R.subarray(off, off + cap); }
+
   const n = L.length;
-  let best = centerLag, peak = -Infinity;
   const scores = new Map();
   const corr = (lag) => {
     if (scores.has(lag)) return scores.get(lag);
@@ -517,60 +541,145 @@ function fineLag(L, R, rate, centerLag, span) {
     scores.set(lag, v);
     return v;
   };
+  // ⚠️ 这里必须用**有符号**相关（sign 由粗定位一次性定死），不能用 |corr|。
+  // 人声有基频周期性，相关曲线在真峰旁边就有反号的旁瓣；窗口一短，
+  // 旁瓣的绝对值可能盖过真峰 —— 实测真实素材上就这么跑偏了 1.2ms
+  let best = centerLag, peak = -Infinity;
   for (let lag = centerLag - span; lag <= centerLag + span; lag++) {
-    const v = Math.abs(corr(lag));
+    const v = sign * corr(lag);
     if (v > peak) { peak = v; best = lag; }
   }
-  // 抛物线插值：三点定顶点，拿到采样以下的精度
-  const y0 = Math.abs(corr(best - 1)), y1 = Math.abs(corr(best)), y2 = Math.abs(corr(best + 1));
-  const denom = y0 - 2 * y1 + y2;
-  const frac = denom !== 0 ? (0.5 * (y0 - y2)) / denom : 0;
-  return {
-    lag: best + (Math.abs(frac) <= 1 ? frac : 0),
-    r: corr(best),
-  };
+  const y0 = sign * corr(best - 1), y1 = sign * corr(best), y2 = sign * corr(best + 1);
+  const den = y0 - 2 * y1 + y2;
+  const frac = den !== 0 ? (0.5 * (y0 - y2)) / den : 0;
+  return { lag: best + (Math.abs(frac) <= 1 ? frac : 0), r: corr(best) };
 }
 
-/** 对轨主流程 */
-async function analyzeAlign(input) {
-  const info = await probeAudio(input);
-  if (!info) throw new Error('这条素材没有音轨');
-  if (info.channels < 2) throw new Error('单声道素材，两条声道本来就是同一条，不需要对轨');
+const SEGMENTS = 3;          // 把窗口切成几段互相复核
+const AGREE_TOL_8K = 4;      // 段间一致的容差（4 个 8k 采样 = 0.5ms）
 
-  // 第一遍：8k 全长（封顶 5 分钟）粗扫，顺便挑出有货的窗口
-  const scan = await decodePCM(input, { rate: 8000, dur: 300 });
-  if (scan.n < 8000) throw new Error('音频太短，不足以分析');
+/**
+ * 主流程。三种走法，代价递增：
+ *
+ *   verify   已经知道同机位另一条素材的偏移量 → 只在它附近做直接相关，不做 FFT。
+ *            一批素材里只有第一条需要真正"搜"，其余都是"验"。
+ *   fast     取一段窗口切成 3 小段，各自独立定位，**两段以上对得上才采信**。
+ *            既是复核也是置信度 —— 比单个相关系数诚实得多。
+ *   wide     小段之间对不上（窗口里是静音、或两条声道压根不相关）才走这条：
+ *            退回全片粗扫找有货的窗口。多两次开文件，但很少发生。
+ */
+async function analyzeAlign(input, opts = {}) {
+  const duration = Number(opts.duration) || 0;
+  // 起点躲开开头的板子/环境音；素材短就从头来
+  const win = Math.min(24, duration > 0 ? Math.max(4, duration) : 24);
+  const start = duration > win + 2 ? Math.min(duration * 0.1, duration - win) : 0;
 
-  const W = bestWindow(scan.L, scan.R, 8000, 12);
-  const cl = coarseLag(
-    scan.L.subarray(W.start, W.start + W.len),
-    scan.R.subarray(W.start, W.start + W.len),
-    8000, 0.5,
-  );
+  let { s8, s48 } = await extractDual(input, start, win);
+  if (s8.n < 8000) ({ s8, s48 } = await extractDual(input, 0, Math.max(4, duration || 24)));
+  if (s8.n < 4000) throw new Error('音频太短，不足以分析');
+  if (identicalChannels(s8.L, s8.R, s8.n)) {
+    throw new Error('两条声道完全相同（单声道素材），不需要对轨');
+  }
 
-  // 第二遍：同一个窗口，48k，带通到人声主band，只在 ±12 采样里精修
-  const startSec = W.start / 8000;
-  const fine = await decodePCM(input, {
-    rate: ALIGN_RATE, start: startSec, dur: W.len / 8000,
-    filter: 'highpass=f=200,lowpass=f=6000',
-  });
-  const center = Math.round(cl.lag * (ALIGN_RATE / 8000));
-  const fl = fine.n > ALIGN_RATE
-    ? fineLag(fine.L, fine.R, ALIGN_RATE, center, 12)
-    : { lag: center, r: 0 };
+  // ── verify：拿着假设去核对，不做 FFT ──
+  if (opts.hint != null && Number.isFinite(opts.hint)) {
+    const hint8 = Math.round((opts.hint / 1000) * 8000);
+    // 极性跟着假设一起传进来（由第一条素材的全搜定的）。
+    // 不在这里现场判：相关峰只有一个多采样宽，假设哪怕只差半毫秒，
+    // 在假设点上量到的相关就已经掉到 0 附近，据此判极性会得到随机结果
+    const sign = opts.sign < 0 ? -1 : 1;
+    // 核对只看假设附近 ±3ms。偏出这个范围就不是"同一套机位的同一个偏移"了，
+    // 该退回全搜，而不是把峰值找到天边去
+    const near = fineLag(s8.L, s8.R, 8000, hint8, 24, 12, sign);
+    const fine = fineLag(s48.L, s48.R, 48000, Math.round(near.lag * 6), 12, 10, sign);
+    // 两个条件都要满足才算"验过了"：峰没跑远，而且确实是个峰
+    return finish(fine, {
+      mode: 'verify', sign,
+      agreed: Math.abs(near.lag - hint8) <= AGREE_TOL_8K && Math.abs(fine.r) >= 0.12,
+      drift: (near.lag - hint8) / 8000 * 1000,
+      segments: 1, sharpness: 0,
+    });
+  }
 
-  // lag>0 表示右声道比左声道早到 → 右声道要往后挪；符号正好和 align 一致
-  const ms = (fl.lag / ALIGN_RATE) * 1000;
-  return {
-    ms,
-    samples: fl.lag,
-    correlation: fl.r,
-    sharpness: cl.sharpness,
-    inverted: fl.r < 0,
-    window: { start: Number(startSec.toFixed(2)), duration: Number((W.len / 8000).toFixed(2)) },
-  };
+  // ── fast：切段复核 ──
+  const seg = Math.floor(s8.n / SEGMENTS);
+  const lags = [], signs = [];
+  let sharp = 0;
+  if (seg > 8000) {
+    const es = [];
+    for (let k = 0; k < SEGMENTS; k++) {
+      es.push(Math.min(energy(s8.L, k * seg, (k + 1) * seg),
+                       energy(s8.R, k * seg, (k + 1) * seg)));
+    }
+    const loudest = Math.max(...es);
+    for (let k = 0; k < SEGMENTS; k++) {
+      if (es[k] < loudest * 0.02) continue;        // 这一段基本是静音，跳过
+      const c = coarseLag(s8.L.subarray(k * seg, (k + 1) * seg),
+                          s8.R.subarray(k * seg, (k + 1) * seg), 8000, 0.5);
+      lags.push(c.lag);
+      signs.push(c.sign);
+      sharp = Math.max(sharp, c.sharpness);
+    }
+  }
+
+  const agreed = consensus(lags, AGREE_TOL_8K);
+  if (agreed) {
+    const sign = signs.reduce((a, b) => a + b, 0) >= 0 ? 1 : -1;
+    const fine = fineLag(s48.L, s48.R, 48000, agreed.value * 6, 16, 10, sign);
+    return finish(fine, { mode: 'fast', agreed: true, segments: agreed.count, sharpness: sharp, sign });
+  }
+
+  return await wideAnalyze(input, duration);
 }
 
+/** 找出彼此在容差内的最大一组，返回其中位数 */
+function consensus(lags, tol) {
+  if (lags.length < 2) return null;
+  let best = null;
+  for (const anchor of lags) {
+    const group = lags.filter((l) => Math.abs(l - anchor) <= tol);
+    if (group.length >= 2 && (!best || group.length > best.count)) {
+      group.sort((a, b) => a - b);
+      best = { value: group[Math.floor(group.length / 2)], count: group.length };
+    }
+  }
+  return best;
+}
+
+/** 兜底：全片 8k 粗扫，挑出两条声道都有货的窗口，再在那儿重跑一次 */
+async function wideAnalyze(input, duration) {
+  const span = Math.min(duration || 300, 300);
+  const { s8 } = await extractDual(input, 0, span);
+  if (s8.n < 8000) throw new Error('音频太短，不足以分析');
+
+  const winLen = Math.min(s8.n, 12 * 8000);
+  const step = 4000;
+  let el = energy(s8.L, 0, winLen), er = energy(s8.R, 0, winLen);
+  let bestStart = 0, bestScore = Math.min(el, er);
+  for (let st = step; st + winLen <= s8.n; st += step) {
+    el += energy(s8.L, st + winLen - step, st + winLen) - energy(s8.L, st - step, st);
+    er += energy(s8.R, st + winLen - step, st + winLen) - energy(s8.R, st - step, st);
+    const sc = Math.min(el, er);
+    if (sc > bestScore) { bestScore = sc; bestStart = st; }
+  }
+
+  const c = coarseLag(s8.L.subarray(bestStart, bestStart + winLen),
+                      s8.R.subarray(bestStart, bestStart + winLen), 8000, 0.5);
+  const re = await extractDual(input, bestStart / 8000, winLen / 8000);
+  const fine = fineLag(re.s48.L, re.s48.R, 48000, c.lag * 6, 16, 10, c.sign);
+  return finish(fine, { mode: 'wide', agreed: false, segments: 1, sharpness: c.sharpness, sign: c.sign });
+}
+
+function finish(fine, meta) {
+  return {
+    ms: (fine.lag / 48000) * 1000,
+    sign: meta.sign ?? 1,
+    samples: fine.lag,
+    correlation: fine.r,
+    inverted: fine.r < 0,
+    ...meta,
+  };
+}
 /** 音轨的声道数 / 采样率。没有音轨返回 null */
 function probeAudio(input) {
   return new Promise((ok) => {
@@ -637,8 +746,13 @@ const server = createServer(async (req, res) => {
     if (url.pathname === '/api/align') {
       const p = url.searchParams.get('path');
       if (!p) return json(res, 400, { error: '缺少路径' });
+      // duration 让分析窗口能躲开片头；hint 是"同机位另一条已经测出的偏移量"，
+      // 给了就只做核对，不做全范围搜索
+      const hint = url.searchParams.has('hint') ? Number(url.searchParams.get('hint')) : null;
+      const sign = Number(url.searchParams.get('sign')) || 1;
+      const duration = Number(url.searchParams.get('dur')) || 0;
       try {
-        return json(res, 200, await analyzeAlign(resolve(expand(p))));
+        return json(res, 200, await analyzeAlign(resolve(expand(p)), { hint, sign, duration }));
       } catch (e) {
         return json(res, 400, { error: e.message });
       }
