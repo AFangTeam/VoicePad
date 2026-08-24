@@ -101,15 +101,27 @@
         <span class="pad-hint pad-hint-l">左</span>
         <span class="pad-hint pad-hint-r">右</span>
         <div class="puck" id="puck"></div>
+        <span class="pad-monitor-veil">监听原始双声道 · 调整不生效</span>
       </div>
       <div class="meter" title="右声道电平"><i id="meterR"></i></div>
       </div>
-      <button class="reset" id="reset">归零</button>
+      <div class="pad-actions">
+        <button class="reset" id="reset">归零</button>
+        <button class="monitor" id="monitorBtn" aria-pressed="false">
+          <span class="mon-dot"></span>双声道监听
+        </button>
+      </div>
     </div>
 
     <div class="readout">
       <div><span id="toneLabel">中性</span><em id="toneValue">0</em></div>
-      <div><span id="balLabel">居中</span><em id="balValue">0</em></div>
+      <div><span id="balLabel">两轨等量</span><em id="balValue">0</em></div>
+    </div>
+
+    <div class="preset">
+      <button id="copyBtn" title="复制当前甜点值 (⌘C)">复制</button>
+      <button id="pasteBtn" title="粘贴到选中素材 (⌘V)" disabled>粘贴</button>
+      <span class="preset-note" id="presetNote">找到甜点值后 ⌘C，选中其他素材 ⌘V</span>
     </div>
 
     <div class="curve-wrap">

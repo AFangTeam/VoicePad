@@ -9,19 +9,25 @@
 
 import {
   buildFilters, frequencyResponse, logFreqs,
-  makeupGainDb, balanceGains, ffmpegAudioFilter, RANGE,
+  makeupGainDb, blendWeights, ffmpegAudioFilter, RANGE,
 } from './dsp.js';
 
 // ── 状态 ────────────────────────────────────────────────────
 
 const state = {
-  tone: 0,        // -1..1  上下
-  balance: 0,     // -1..1  左右
+  tone: 0,        // -1..1  上下：音色
+  balance: 0,     // -1..1  左右：两条输入声道 blend 成一路单声道的配比
   master: 1,      // 0..1.6
+  // 双声道监听：只是听一下原始双轨长什么样的**监听工具**，
+  // 不影响导出 —— 导出永远是调好的那一路单声道。
+  stereoMonitor: false,
   files: [],
   selected: new Set(),
   current: -1,
 };
+
+/** ⌘C 存下来的甜点值 */
+let clipboard = null;
 
 const $ = (id) => document.getElementById(id);
 const video = $('video');
@@ -84,13 +90,22 @@ function buildAudioGraph() {
 
   const makeup = ctx.createGain();
 
-  // 声道平衡：拆成 L/R 各自加增益再合回去
+  // 声道 blend：拆成 L/R、各自配重、**合成一路单声道**。
+  //
+  // 注意 merger 的两个输入都接同一路 blend 结果 —— 这样出来的
+  // 左右耳内容完全相同，也就是真正的单声道（只是用双声道容器播）。
   const splitter = ctx.createChannelSplitter(2);
   const gainL = ctx.createGain();
   const gainR = ctx.createGain();
+  const blendSum = ctx.createGain();
   const merger = ctx.createChannelMerger(2);
 
   const master = ctx.createGain();
+
+  // 双声道监听旁路：直接从 upmix 取原始双轨，绕过 EQ 和 blend。
+  // 走独立的增益节点，切换时只在两条支路间交叉淡入淡出，不重连图。
+  const monitorTap = ctx.createGain();
+  const processedTap = ctx.createGain();
 
   let chain = upmix;
   for (const f of eq) { chain.connect(f); chain = f; }
@@ -98,9 +113,17 @@ function buildAudioGraph() {
   makeup.connect(splitter);
   splitter.connect(gainL, 0);
   splitter.connect(gainR, 1);
-  gainL.connect(merger, 0, 0);
-  gainR.connect(merger, 0, 1);
-  merger.connect(master);
+  gainL.connect(blendSum);
+  gainR.connect(blendSum);
+  // 同一路送进左右两个输入 = 单声道
+  blendSum.connect(merger, 0, 0);
+  blendSum.connect(merger, 0, 1);
+  merger.connect(processedTap);
+  processedTap.connect(master);
+
+  upmix.connect(monitorTap);
+  monitorTap.connect(master);
+
   master.connect(ctx.destination);
 
   // 左右声道电平表。装它有两个理由：真实音频驱动的动态是最诚实的
@@ -114,7 +137,7 @@ function buildAudioGraph() {
   meterSplit.connect(anL, 0);
   meterSplit.connect(anR, 1);
 
-  nodes = { eq, makeup, gainL, gainR, master, anL, anR };
+  nodes = { eq, makeup, gainL, gainR, master, anL, anR, monitorTap, processedTap };
   applyAudio(true);
   startMeters();
 }
@@ -195,10 +218,15 @@ function applyAudio(immediate = false) {
   // 注意是 .gain —— GainNode 本身不是 AudioParam
   set(nodes.makeup.gain, Math.pow(10, makeupGainDb(filters, fs) / 20));
 
-  const bal = balanceGains(state.balance);
-  set(nodes.gainL.gain, bal.left);
-  set(nodes.gainR.gain, bal.right);
+  const w = blendWeights(state.balance);
+  set(nodes.gainL.gain, w.left);
+  set(nodes.gainR.gain, w.right);
   set(nodes.master.gain, state.master);
+
+  // 监听切换：两条支路交叉淡入淡出。用 TAU 平滑而不是直接切，
+  // 否则按一下按钮就是"啪"的一声。
+  set(nodes.monitorTap.gain, state.stereoMonitor ? 1 : 0);
+  set(nodes.processedTap.gain, state.stereoMonitor ? 0 : 1);
 }
 
 // ── 读数与曲线 ──────────────────────────────────────────────
@@ -212,8 +240,10 @@ function toneWord(t) {
 }
 
 function balWord(b) {
-  if (Math.abs(b) < 0.06) return '居中';
-  return b < 0 ? '偏左' : '偏右';
+  if (b <= -0.97) return '仅左声道';
+  if (b >= 0.97) return '仅右声道';
+  if (Math.abs(b) < 0.06) return '两轨等量';
+  return b < 0 ? '偏左声道' : '偏右声道';
 }
 
 const curve = $('curve');
@@ -400,6 +430,16 @@ function drawPad() {
   c.stroke();
 }
 
+/** 监听模式下的"空转"光点位置（归一化，0..1） */
+let ghost = null;
+
+function paintGhost() {
+  if (!ghost) return;
+  const w = pad.clientWidth;
+  $('puck').style.left = `${w * ghost.x}px`;
+  $('puck').style.top = `${w * ghost.y}px`;
+}
+
 function render() {
   const pad = $('pad');
   document.documentElement.style.setProperty('--live', liveColor());
@@ -432,8 +472,20 @@ function render() {
 const pad = $('pad');
 
 function padUpdate(e) {
+  // 双声道监听时：**光点照样跟手，但数值不写回**。
+  // 这正是用户要的手感 —— 拖得动、看得见位置，但明确没生效。
   const rect = pad.getBoundingClientRect();
   if (rect.width < 1) return;
+  if (state.stereoMonitor) {
+    const gx = (e.clientX - rect.left) / rect.width;
+    const gy = (e.clientY - rect.top) / rect.height;
+    ghost = {
+      x: Math.max(0.08, Math.min(0.92, gx)),
+      y: Math.max(0.08, Math.min(0.92, gy)),
+    };
+    paintGhost();
+    return;
+  }
   // 方形面板：每轴独立夹取。0.42 是点阵可视范围的半宽，
   // 和 render() 里的正向映射必须是同一个数，否则 puck 会跟不上手指
   const dx = (e.clientX - rect.left - rect.width / 2) / (rect.width * 0.42);
@@ -476,6 +528,51 @@ $('reset').addEventListener('click', () => {
   render();
 });
 
+$('monitorBtn').addEventListener('click', () => {
+  ensureAudio();
+  state.stereoMonitor = !state.stereoMonitor;
+  $('monitorBtn').setAttribute('aria-pressed', String(state.stereoMonitor));
+  pad.classList.toggle('monitoring', state.stereoMonitor);
+  if (!state.stereoMonitor) {
+    // 退出监听：光点弹回真实参数位置
+    ghost = null;
+    pad.classList.add('settle');
+    setTimeout(() => pad.classList.remove('settle'), 550);
+  }
+  render();
+});
+
+// ── 甜点值 复制 / 粘贴 ──────────────────────────────────────
+
+function copyParams() {
+  clipboard = snapshotParams();
+  const note = $('presetNote');
+  note.textContent =
+    `已复制：${toneWord(clipboard.tone)} ${clipboard.tone.toFixed(2)} · ` +
+    `${balWord(clipboard.balance)} ${clipboard.balance.toFixed(2)} · ` +
+    `${Math.round(clipboard.master * 100)}%`;
+  note.classList.add('armed');
+  $('pasteBtn').disabled = false;
+  toast('已复制甜点值 —— 选中其他素材后 ⌘V 应用');
+}
+
+function pasteParams() {
+  if (!clipboard) return toast('还没有复制过甜点值');
+  const targets = [...state.selected];
+  if (!targets.length) return toast('先在列表里勾选要应用的素材');
+
+  for (const i of targets) {
+    if (state.files[i]) state.files[i].params = { ...clipboard };
+  }
+  // 当前正在看的这条也在选中集里的话，面板同步更新
+  if (targets.includes(state.current)) loadParams({ ...clipboard });
+  renderClips();
+  toast(`已应用到 ${targets.length} 条素材`);
+}
+
+$('copyBtn').addEventListener('click', copyParams);
+$('pasteBtn').addEventListener('click', pasteParams);
+
 $('master').addEventListener('input', (e) => {
   ensureAudio();
   state.master = Number(e.target.value) / 100;
@@ -485,6 +582,15 @@ $('master').addEventListener('input', (e) => {
 // 方向键微调 —— 精调时鼠标不够准
 window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT') return;
+
+  // ⌘C / ⌘V —— 甜点值的复制粘贴
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
+    e.preventDefault(); copyParams(); return;
+  }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {
+    e.preventDefault(); pasteParams(); return;
+  }
+
   const step = e.shiftKey ? 0.01 : 0.05;
   const map = {
     ArrowUp: () => state.tone = Math.min(1, state.tone + step),
@@ -537,11 +643,15 @@ function renderClips() {
     meta.className = 'meta';
     meta.textContent = `${fmtDuration(f.duration)} · ${fmtSize(f.size)}`;
 
+    // 有自己参数的素材打个标 —— 批量粘贴后一眼看出哪些已经应用了
+    const tuned = document.createElement('span');
+    if (f.params) { tuned.className = 'tuned'; tuned.textContent = '已调'; }
+
     const st = document.createElement('span');
     st.className = 'state';
     st.dataset.index = String(i);
 
-    li.append(cb, name, meta, st);
+    li.append(cb, name, tuned, meta, st);
     li.addEventListener('click', () => open(i));
     ul.appendChild(li);
   });
@@ -549,11 +659,34 @@ function renderClips() {
   syncExportButton();
 }
 
+/** 当前面板参数的快照 */
+function snapshotParams() {
+  return { tone: state.tone, balance: state.balance, master: state.master };
+}
+
+/** 把参数装进面板 */
+function loadParams(p) {
+  state.tone = p.tone;
+  state.balance = p.balance;
+  state.master = p.master;
+  $('master').value = String(Math.round(p.master * 100));
+  render();
+}
+
 function open(i) {
   const f = state.files[i];
   if (!f) return;
+
+  // 换素材前把当前调好的值存回上一条 —— 否则一切走就白调了
+  if (state.current >= 0 && state.files[state.current]) {
+    state.files[state.current].params = snapshotParams();
+  }
+
   state.current = i;
   ensureAudio();
+
+  // 这条素材有自己的参数就恢复，没有就沿用当前面板（连续调多条时更顺手）
+  if (f.params) loadParams(f.params);
 
   // 两种来源：
   //   拖进来的 → File 对象，直接 blob URL，瞬时可播、不经服务端
@@ -612,11 +745,20 @@ $('exportBtn').addEventListener('click', async () => {
   const chosen = [...state.selected].sort((a, b) => a - b);
   if (!chosen.length) return;
 
-  // 导出用的滤镜串由**同一个 dsp.js**生成，和预览听到的是同一套系数
-  const filter = ffmpegAudioFilter(
-    { tone: state.tone, balance: state.balance, master: state.master },
-    ctx ? ctx.sampleRate : 48000
-  );
+  // 先把当前面板的值存回正在看的这条，否则刚调完直接导出会丢掉
+  if (state.current >= 0 && state.files[state.current]) {
+    state.files[state.current].params = snapshotParams();
+  }
+
+  // ⚠️ 逐条用**它自己的**参数生成滤镜串。
+  //
+  // 批量粘贴甜点值之后，每条素材可能各有各的设置（比如有几条单独微调过），
+  // 用一个全局参数导出会把那些微调抹掉。
+  // 没有自己参数的沿用当前面板 —— 那是用户刚调好还没切走的情形。
+  const fallback = snapshotParams();
+  const fsRate = ctx ? ctx.sampleRate : 48000;
+  const filterFor = (i) =>
+    ffmpegAudioFilter(state.files[i]?.params || fallback, fsRate);
 
   $('exportBtn').disabled = true;
   $('progress').hidden = false;
@@ -630,7 +772,8 @@ $('exportBtn').addEventListener('click', async () => {
       const i = chosen[k];
       const f = state.files[i];
       if (f.path) {
-        picked.push({ index: i, path: f.path, duration: f.duration, name: f.name });
+        picked.push({ index: i, path: f.path, duration: f.duration,
+                      name: f.name, filter: filterFor(i) });
         continue;
       }
       $('progressText').textContent = `上传 ${f.name}（${k + 1}/${chosen.length}）`;
@@ -652,7 +795,7 @@ $('exportBtn').addEventListener('click', async () => {
       if (!res.ok) throw new Error(info.error || '上传失败');
       picked.push({
         index: i, path: info.path, duration: info.duration ?? f.duration,
-        name: f.name, uploaded: true,
+        name: f.name, uploaded: true, filter: filterFor(i),
       });
       if (el) el.textContent = '待导出';
     }
@@ -670,7 +813,8 @@ $('exportBtn').addEventListener('click', async () => {
   const res = await fetch('/api/export', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ files: picked, filter }),
+    // filter 现在挂在每条上；顶层这个只作兼容兜底
+    body: JSON.stringify({ files: picked, filter: picked[0].filter }),
   });
 
   let lastOutput = null;

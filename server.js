@@ -211,7 +211,9 @@ async function handleExport(req, res) {
     const f = files[i];
     send({ type: 'start', index: i, name: f.name || basename(f.path) });
     try {
-      const out = await exportOne(f.path, filter, (sec) => {
+      // 每条素材用自己的滤镜串（批量粘贴后各条可能不同），
+      // 没带就退回整单的那一条
+      const out = await exportOne(f.path, f.filter || filter, (sec) => {
         send({ type: 'progress', index: i, seconds: sec, duration: f.duration || null });
       }, {
         // 上传来的素材没有源文件夹，统一落 ~/Movies/VoicePad

@@ -674,3 +674,92 @@ input[type=range]:active::-webkit-slider-thumb { cursor: grabbing; transform: sc
 
 /* 素材行的选中态给一条左侧活色描边，和苹果侧栏一个语气 */
 .clips li.active { box-shadow: inset 2px 0 0 var(--live); }
+
+/* ── 双声道监听 / 甜点值 ────────────────────────────────── */
+
+.pad-actions { display: flex; align-items: center; gap: 8px; }
+
+.monitor {
+  height: 26px;
+  padding: 0 11px;
+  font-size: 12px;
+  color: var(--text-2);
+  background: transparent;
+  border-color: var(--line-soft);
+  display: flex; align-items: center; gap: 6px;
+}
+
+.monitor:hover:not(:disabled) { color: var(--text); background: var(--surface-2); }
+
+.mon-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-3);
+  transition: background 0.16s var(--ease), box-shadow 0.16s var(--ease);
+}
+
+.monitor[aria-pressed="true"] {
+  color: #b7d8ff;
+  border-color: rgba(183, 216, 255, 0.42);
+  background: rgba(183, 216, 255, 0.10);
+}
+
+.monitor[aria-pressed="true"] .mon-dot {
+  background: #b7d8ff;
+  box-shadow: 0 0 8px #b7d8ff;
+}
+
+/* 监听模式下 pad 整体压暗、失去光泽 —— 拖得动但看得出没生效 */
+.pad.monitoring { cursor: grab; }
+.pad.monitoring canvas { filter: grayscale(0.85) brightness(0.42); }
+.pad.monitoring .puck {
+  background: #6c737c;
+  box-shadow: none;
+  opacity: 0.75;
+}
+.pad.monitoring .puck::after { background: rgba(0,0,0,0.35); }
+.pad.monitoring .pad-hint { opacity: 0.25; }
+
+.pad-monitor-veil {
+  position: absolute;
+  left: 50%; bottom: 13%;
+  transform: translateX(-50%);
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  color: #b7d8ff;
+  background: rgba(12, 13, 15, 0.7);
+  border: 1px solid rgba(183, 216, 255, 0.28);
+  padding: 3px 10px;
+  border-radius: 999px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s var(--ease);
+  white-space: nowrap;
+}
+
+.pad.monitoring .pad-monitor-veil { opacity: 1; }
+
+/* 甜点值 */
+
+.preset { display: flex; align-items: center; gap: 8px; }
+.preset button { height: 26px; padding: 0 12px; font-size: 12px; }
+.preset-note {
+  font-size: 11px;
+  color: var(--text-3);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.preset-note.armed { color: var(--live); }
+
+/* 素材行：带自定义参数的打个标 */
+.clips li .tuned {
+  font-size: 10px;
+  color: var(--live);
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  padding: 0 4px;
+  flex: none;
+  opacity: 0.85;
+}

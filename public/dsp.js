@@ -54,7 +54,7 @@
 export const RANGE = {
   // 上下：音色。+1 = 通透明亮，-1 = 低沉有磁性
   tone: { min: -1, max: 1 },
-  // 左右：声道平衡。+1 = 右声道更大
+  // 左右：两条输入声道 blend 成一路单声道的配比。-1 = 纯左，+1 = 纯右
   balance: { min: -1, max: 1 },
   // 总音量，1 = 原始
   master: { min: 0, max: 1.6 },
@@ -245,25 +245,43 @@ export function makeupGainDb(filters, fs = 48000) {
   return peak > 0 ? -peak : 0;
 }
 
-// ── 声道平衡 ────────────────────────────────────────────────
+// ── 声道 blend（产出是单声道）────────────────────────────────
 
 /**
- * 左右拽 → 两个声道的增益（线性）。
+ * 左右拽 → 把两条输入声道**混成一路单声道**的权重。
  *
- * 做成"近侧小抬 + 远侧大降"的倾斜，而不是简单的 pan：
- * 用户要的是"往左拽左声道更大"，但如果只抬近侧，全推到底会削波。
- * 近侧 +3 dB、远侧 −16 dB 的组合听感上是明确的偏向，又留足了余量。
+ * 这不是声像平衡。产出只有一路声音，左右决定"这一路里两个声道各占多少"：
+ *
+ *     blend = -1   纯左声道
+ *     blend =  0   两路等量混合
+ *     blend = +1   纯右声道
+ *
+ * 典型场景是相机双轨：一轨机头麦、一轨小蜜蜂，或者一轨接了 mic、
+ * 另一轨是空的/底噪。用左右在两轨之间找那个最干净的配比，
+ * 而不是让它们分别待在左右耳里。
+ *
+ * ## 为什么不是线性 crossfade
+ *
+ * 线性权重（w, 1-w）在中点时两路各 0.5，如果两轨内容**相关**
+ * （同一个声源的两个麦），相加后振幅是 1.0 —— 正常；
+ * 但如果**不相关**（两个独立声源），功率相加后只有 0.707，中点会明显变轻。
+ *
+ * 用等功率（√）曲线：两路权重的平方和恒为 1，不相关信号在任何位置
+ * 响度都稳定。代价是相关信号在中点会响 3 dB —— 但这一路后面还有
+ * 峰值补偿和总音量，而"中间突然变轻"比"中间稍响"难受得多。
  */
-export function balanceGains(balance) {
-  const b = Math.max(-1, Math.min(1, balance));
-  const nearDb = 3 * Math.abs(b);
-  const farDb = -16 * Math.abs(b);
-  const near = Math.pow(10, nearDb / 20);
-  const far = Math.pow(10, farDb / 20);
-  if (b < 0) return { left: near, right: far };
-  if (b > 0) return { left: far, right: near };
-  return { left: 1, right: 1 };
+export function blendWeights(blend) {
+  const b = Math.max(-1, Math.min(1, blend));
+  // 把 -1..1 映射到 0..π/2，取 cos/sin 得到等功率的一对权重
+  const theta = ((b + 1) / 2) * (Math.PI / 2);
+  return { left: Math.cos(theta), right: Math.sin(theta) };
 }
+
+/**
+ * 旧名保留：现在返回的是 blend 权重。
+ * 界面上"左/右"的读数仍然沿用它。
+ */
+export const balanceGains = blendWeights;
 
 // ── 导出：ffmpeg 滤镜串 ─────────────────────────────────────
 
@@ -275,6 +293,10 @@ const f6 = (v) => Number(v).toFixed(10);
  * 用 `biquad` 喂显式系数，而不是 ffmpeg 自己的 equalizer/bass/treble ——
  * 那几个的参数化方式和 Web Audio 不完全一样（尤其是 shelf 的斜率），
  * 用它们就等于两边各算各的，预览和导出会有肉眼（耳）难察的偏差。
+ */
+/**
+ * ⚠️ 导出**永远是单声道**，和「双声道监听」按钮无关 ——
+ * 那个按钮只是让你听一下原始双轨长什么样，是个监听工具，不是一档产出模式。
  */
 export function ffmpegAudioFilter({ tone, balance, master }, fs = 48000) {
   const filters = buildFilters(tone, fs);
@@ -288,9 +310,10 @@ export function ffmpegAudioFilter({ tone, balance, master }, fs = 48000) {
     );
   }
 
-  const { left, right } = balanceGains(balance);
-  // pan 同时完成声道平衡。输入是单声道时也要能用，所以两路都从 c0 取。
-  parts.push(`pan=stereo|c0=${f6(left)}*c0|c1=${f6(right)}*c1`);
+  const { left, right } = blendWeights(balance);
+  // 关键：产出是**单声道**。pan=mono 把两路按权重合成一路，
+  // 而不是分别送进左右耳。前面已经 aformat 成 stereo，所以 c0/c1 一定存在。
+  parts.push(`pan=mono|c0=${f6(left)}*c0+${f6(right)}*c1`);
 
   const totalDb = makeupGainDb(filters, fs);
   const gain = Math.pow(10, totalDb / 20) * master;
