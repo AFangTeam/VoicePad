@@ -471,11 +471,21 @@ input[type=range]:active::-webkit-slider-thumb { cursor: grabbing; transform: sc
   padding: 8px;
 }
 
-.curve-wrap canvas { width: 100%; height: 90px; display: block; }
+.curve-wrap canvas { width: 100%; height: 76px; display: block; }
 
 /* 导出 */
 
-.export { margin-top: auto; display: flex; flex-direction: column; gap: 8px; }
+/* 主操作钉在面板底部。加了对轨区之后内容高过一屏,
+   导出按钮会掉到折线以下 —— 一个"随时能按"的按钮不该要人先滚动去找 */
+.export {
+  position: sticky;
+  bottom: -18px;                 /* 抵掉 .panel 的 padding,贴到真正的底边 */
+  z-index: 2;
+  margin-top: auto;
+  padding: 10px 0 18px;
+  display: flex; flex-direction: column; gap: 8px;
+  background: linear-gradient(180deg, transparent, var(--surface) 14px);
+}
 
 #exportBtn {
   height: 36px;
@@ -857,3 +867,95 @@ input[type=range]:active::-webkit-slider-thumb { cursor: grabbing; transform: sc
 .preset-note.armed { color: var(--live); }
 
 /* 素材行：带自定义参数的打个标 */
+
+
+/* ── 声道对轨 ─────────────────────────────────────────────── */
+
+.align {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 13px 14px 11px;
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.018);
+}
+
+.align-head { display: flex; align-items: center; gap: 9px; }
+
+#alignBtn {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 6px 13px;
+  font: inherit; font-size: 12.5px;
+  color: var(--ink, #f2f4f7);
+  background: rgba(255,255,255,0.07);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background .16s ease, border-color .16s ease;
+}
+#alignBtn:hover:not(:disabled) { background: rgba(255,255,255,0.11); border-color: rgba(255,255,255,0.2); }
+#alignBtn:disabled { opacity: .55; cursor: default; }
+
+/* 分析时转起来的小环。有反馈总比按下去没反应强 */
+.align-spin {
+  width: 11px; height: 11px; border-radius: 50%;
+  border: 1.5px solid rgba(255,255,255,0.22);
+  border-top-color: var(--warm, #f0a44a);
+  opacity: 0;
+  transition: opacity .15s ease;
+}
+#alignBtn.busy .align-spin { opacity: 1; animation: align-spin .7s linear infinite; }
+@keyframes align-spin { to { transform: rotate(360deg); } }
+
+.align-value {
+  padding: 4px 9px;
+  font: inherit;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: #6d7683;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  cursor: default;
+}
+.align-value.on {
+  color: var(--warm, #f0a44a);
+  border-color: rgba(240,164,74,0.28);
+  background: rgba(240,164,74,0.09);
+  cursor: pointer;
+}
+.align-value.on:hover { background: rgba(240,164,74,0.16); }
+
+/* 中点刻度：三次方映射下零点很关键,给条实线标出来 */
+#alignSlider {
+  --align-tick: rgba(255,255,255,0.28);
+  width: 100%;
+  background:
+    linear-gradient(var(--align-tick), var(--align-tick)) center / 1px 11px no-repeat;
+}
+
+.align-scale {
+  display: flex; justify-content: space-between;
+  font-size: 10.5px; color: #545c67; letter-spacing: .2px;
+}
+
+.align-note {
+  min-height: 15px;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #6d7683;
+}
+/* 采样数放在头一行、数值左边。别放进 .align-note 里 ——
+   那一行的文案是整段重写的,嵌在里面的元素会被 textContent 抹掉 */
+.align-samples {
+  margin-left: auto;
+  font-size: 11px;
+  color: #6d7683;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 双声道监听时对轨也不生效 —— 监听走的是原始双轨旁路 */
+.panel.monitoring .align { opacity: .45; }

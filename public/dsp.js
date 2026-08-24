@@ -294,13 +294,60 @@ const f6 = (v) => Number(v).toFixed(10);
  * 那几个的参数化方式和 Web Audio 不完全一样（尤其是 shelf 的斜率），
  * 用它们就等于两边各算各的，预览和导出会有肉眼（耳）难察的偏差。
  */
+
+// ── 声道对轨 ────────────────────────────────────────────────
+//
+// 两支麦到同一个声源的距离/链路不同，两条声道之间会差一个固定的小延迟。
+// 合成单声道时这个延迟就是**梳状滤波**：每隔 1/τ 赫兹一个陷波，
+// 听感就是"糊""空""像加了 chorus"。τ=20ms 时每 50Hz 一个陷波 —— 整个频谱都被啃了。
+//
+// 修法只有一个：把两条声道对齐再相加。
+
+/** 对轨量的上限。超过 0.5 秒就不是"同一次录音的两支麦"了，是别的问题 */
+export const ALIGN_MAX_MS = 500;
+
+/** 导出统一到 48k。滑条步进 = 1 个采样，这样预览和导出落在同一个网格上 */
+export const ALIGN_GRID_HZ = 48000;
+
+/** 一个采样对应多少毫秒 —— 滑条的最小步长 */
+export const ALIGN_STEP_MS = 1000 / ALIGN_GRID_HZ;
+
+/**
+ * 把「右声道要移动多少毫秒」翻译成两条声道各自的**正向**延迟采样数。
+ *
+ * 正 = 右声道往后挪；负 = 右声道往前挪。
+ * 但不管是实时图还是 ffmpeg，都只有"延迟"这一种原语，没有"提前"。
+ * 所以负值靠**延迟左声道**来实现 —— 相对关系一样，代价是整条音频晚了 |align|。
+ * 导出时再把开头那段裁掉，左声道相对画面的时间就没变（用户要的就是"左声道不变"）。
+ */
+export function alignSamples(alignMs, fs) {
+  const clamped = Math.max(-ALIGN_MAX_MS, Math.min(ALIGN_MAX_MS, alignMs || 0));
+  const n = Math.round((clamped / 1000) * fs);
+  return { left: Math.max(0, -n), right: Math.max(0, n) };
+}
+
+/** 量化到采样网格。滑条、自动对轨的结果都要过这一道，否则预览和导出会差半个采样 */
+export function quantizeAlign(alignMs) {
+  const clamped = Math.max(-ALIGN_MAX_MS, Math.min(ALIGN_MAX_MS, alignMs || 0));
+  return Math.round(clamped / ALIGN_STEP_MS) * ALIGN_STEP_MS;
+}
+
 /**
  * ⚠️ 导出**永远是单声道**，和「双声道监听」按钮无关 ——
  * 那个按钮只是让你听一下原始双轨长什么样，是个监听工具，不是一档产出模式。
  */
-export function ffmpegAudioFilter({ tone, balance, master }, fs = 48000) {
+export function ffmpegAudioFilter({ tone, balance, master, align = 0 }, fs = 48000) {
   const filters = buildFilters(tone, fs);
   const parts = [];
+
+  // 对轨必须在 pan=mono **之前** —— 合成之后就没有两条声道可对了。
+  const d = alignSamples(align, fs);
+  if (d.left || d.right) {
+    parts.push(`adelay=delays=${d.left}S|${d.right}S:all=0`);
+    // 延迟左声道会把整条音频往后推，画面就对不上了。把推出来的那段裁掉，
+    // 左声道相对画面的时间点回到原位，被"提前"的只有右声道。
+    if (d.left) parts.push(`atrim=start_sample=${d.left}`, 'asetpts=N/SR/TB');
+  }
 
   for (const f of filters) {
     const c = f.coeffs;

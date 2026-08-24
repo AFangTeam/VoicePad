@@ -10,6 +10,7 @@
 import {
   buildFilters, frequencyResponse, logFreqs,
   makeupGainDb, blendWeights, ffmpegAudioFilter, RANGE,
+  ALIGN_MAX_MS, ALIGN_GRID_HZ, ALIGN_STEP_MS, quantizeAlign,
 } from './dsp.js';
 
 // ── 状态 ────────────────────────────────────────────────────
@@ -18,6 +19,8 @@ const state = {
   tone: 0,        // -1..1  上下：音色
   balance: 0,     // -1..1  左右：两条输入声道 blend 成一路单声道的配比
   master: 1,      // 0..1.6
+  // 右声道相对左声道要挪多少毫秒（正=往后）。左声道永远不动 —— 它是画面的时间基准
+  align: 0,
   // 双声道监听：只是听一下原始双轨长什么样的**监听工具**，
   // 不影响导出 —— 导出永远是调好的那一路单声道。
   stereoMonitor: false,
@@ -111,6 +114,10 @@ function buildAudioGraph() {
   // 注意 merger 的两个输入都接同一路 blend 结果 —— 这样出来的
   // 左右耳内容完全相同，也就是真正的单声道（只是用双声道容器播）。
   const splitter = ctx.createChannelSplitter(2);
+  // 对轨延迟。必须在配重求和**之前** —— 加完就没有两条声道可对了。
+  // DelayNode 只能"延后"不能"提前"，所以负的对轨量靠延迟左声道实现。
+  const delayL = ctx.createDelay(ALIGN_MAX_MS / 1000 + 0.05);
+  const delayR = ctx.createDelay(ALIGN_MAX_MS / 1000 + 0.05);
   const gainL = ctx.createGain();
   const gainR = ctx.createGain();
   const blendSum = ctx.createGain();
@@ -127,8 +134,10 @@ function buildAudioGraph() {
   for (const f of eq) { chain.connect(f); chain = f; }
   chain.connect(makeup);
   makeup.connect(splitter);
-  splitter.connect(gainL, 0);
-  splitter.connect(gainR, 1);
+  splitter.connect(delayL, 0);
+  splitter.connect(delayR, 1);
+  delayL.connect(gainL);
+  delayR.connect(gainR);
   gainL.connect(blendSum);
   gainR.connect(blendSum);
   // 同一路送进左右两个输入 = 单声道
@@ -153,7 +162,7 @@ function buildAudioGraph() {
   meterSplit.connect(anL, 0);
   meterSplit.connect(anR, 1);
 
-  nodes = { eq, makeup, gainL, gainR, master, anL, anR, monitorTap, processedTap };
+  nodes = { eq, makeup, gainL, gainR, master, anL, anR, monitorTap, processedTap, delayL, delayR };
   applyAudio(true);
   startMeters();
 }
@@ -237,6 +246,9 @@ function applyAudio(immediate = false) {
   const w = blendWeights(state.balance);
   set(nodes.gainL.gain, w.left);
   set(nodes.gainR.gain, w.right);
+  // 只有一边真的加延迟，另一边是 0。相对关系才是有意义的那个量
+  set(nodes.delayL.delayTime, Math.max(0, -state.align) / 1000);
+  set(nodes.delayR.delayTime, Math.max(0, state.align) / 1000);
   set(nodes.master.gain, state.master);
 
   // 监听切换：两条支路交叉淡入淡出。用 TAU 平滑而不是直接切，
@@ -457,6 +469,7 @@ function paintGhost() {
 }
 
 function render() {
+  syncAlignUI();
   const pad = $('pad');
   document.documentElement.style.setProperty('--live', liveColor());
   const w = pad.clientWidth;
@@ -571,6 +584,9 @@ $('monitorBtn').addEventListener('click', () => {
   state.stereoMonitor = !state.stereoMonitor;
   $('monitorBtn').setAttribute('aria-pressed', String(state.stereoMonitor));
   pad.classList.toggle('monitoring', state.stereoMonitor);
+  // 监听旁路直接从 upmix 取原始双轨,根本没经过延迟节点 —— 对轨此刻确实不生效,
+  // 那就照实变暗,别让人以为在听对轨后的效果
+  document.querySelector('.panel').classList.toggle('monitoring', state.stereoMonitor);
   if (!state.stereoMonitor) {
     // 退出监听：光点弹回真实参数位置
     ghost = null;
@@ -590,7 +606,12 @@ $('monitorBtn').addEventListener('click', () => {
  * 否则粘贴一次甜点值会顺手把别人的监听状态也改掉。
  */
 function snapshotParams() {
-  return { tone: state.tone, balance: state.balance, master: state.master };
+  return {
+    tone: state.tone, balance: state.balance, master: state.master,
+    // 对轨值也进快照：同一套机位/麦克风拍的一批素材，时间差是同一个，
+    // 在一条上对好之后 ⌘C / ⌘V 铺给其他条是最省事的做法
+    align: state.align,
+  };
 }
 
 /** 快照写回面板。走 render() 而不是直接改 DOM，声音和画面一起跟上 */
@@ -599,7 +620,9 @@ function loadParams(p) {
   state.tone = Math.max(-1, Math.min(1, Number(p.tone) || 0));
   state.balance = Math.max(-1, Math.min(1, Number(p.balance) || 0));
   state.master = Math.max(0, Math.min(1.6, p.master == null ? 1 : Number(p.master)));
+  state.align = quantizeAlign(Number(p.align) || 0);
   $('master').value = String(Math.round(state.master * 100));
+  syncAlignUI();
   ensureAudio();
   render();
 }
@@ -610,7 +633,8 @@ function copyParams() {
   note.textContent =
     `已复制：${toneWord(clipboard.tone)} ${clipboard.tone.toFixed(2)} · ` +
     `${balWord(clipboard.balance)} ${clipboard.balance.toFixed(2)} · ` +
-    `${Math.round(clipboard.master * 100)}%`;
+    `${Math.round(clipboard.master * 100)}%` +
+    (clipboard.align ? ` · 对轨 ${clipboard.align > 0 ? '+' : ''}${clipboard.align.toFixed(3)}ms` : '');
   note.classList.add('armed');
   $('pasteBtn').disabled = false;
   toast('已复制甜点值 —— 选中其他素材后 ⌘V 应用');
@@ -629,6 +653,116 @@ function pasteParams() {
   renderClips();
   toast(`已应用到 ${targets.length} 条素材`);
 }
+
+
+// ── 声道对轨 ────────────────────────────────────────────────
+//
+// 两支麦到声源的距离/链路不同 → 两条声道差一个固定小延迟 → 合成单声道时
+// 变成梳状滤波（每隔 1/τ 赫兹一个陷波），听感就是"糊""像 chorus"。
+// 这里做的事只有一件：把这个延迟量测出来，然后抵消掉。
+
+/** 滑条位置 ↔ 毫秒。三次方曲线：中间细、两头粗 —— 真正要调的永远是零点附近的几毫秒 */
+const sliderToMs = (x) => quantizeAlign(Math.sign(x) * ALIGN_MAX_MS * Math.abs(x) ** 3);
+const msToSlider = (ms) => Math.sign(ms) * (Math.abs(ms) / ALIGN_MAX_MS) ** (1 / 3);
+
+function syncAlignUI() {
+  const ms = state.align;
+  $('alignSlider').value = String(Math.round(msToSlider(ms) * 1000));
+  const samples = Math.round((ms / 1000) * ALIGN_GRID_HZ);
+  $('alignValue').textContent = ms === 0
+    ? '未对轨'
+    : `${ms > 0 ? '+' : '−'}${Math.abs(ms).toFixed(3)} ms`;
+  $('alignValue').classList.toggle('on', ms !== 0);
+  $('alignSamples').textContent = ms === 0 ? '' : `右声道${ms > 0 ? '后移' : '前移'} ${Math.abs(samples)} 采样`;
+}
+
+/**
+ * 拿到服务端能读到的路径。
+ * 拖进来的素材只是浏览器里的 File，服务端够不着，得先传上去；
+ * 传完把路径记在素材上，导出时就不用再传一遍。
+ */
+async function serverPath(f) {
+  if (f.path) return f.path;
+  if (f.serverPath) return f.serverPath;
+  $('alignNote').textContent = `上传 ${f.name} 以供分析…`;
+  const res = await fetch('/api/upload', {
+    method: 'POST',
+    headers: { 'X-Filename': encodeURIComponent(f.name), 'Content-Type': 'application/octet-stream' },
+    body: f.file,
+    duplex: 'half',
+  });
+  const info = await res.json();
+  if (!res.ok) throw new Error(info.error || '上传失败');
+  f.serverPath = info.path;
+  return info.path;
+}
+
+async function autoAlign() {
+  const f = state.files[state.current];
+  if (!f) return toast('先选一条素材');
+
+  const btn = $('alignBtn');
+  btn.disabled = true;
+  btn.classList.add('busy');
+  $('alignNote').textContent = '分析中…';
+  try {
+    const path = await serverPath(f);
+    const r = await fetch(`/api/align?path=${encodeURIComponent(path)}`).then((x) => x.json());
+    if (r.error) throw new Error(r.error);
+
+    const strength = Math.abs(r.correlation);
+    // 相关度太低说明两条声道压根不是同一个声源（比如真立体声音乐、
+    // 或一条是环境声）。这种情况下对齐没有物理意义，宁可什么都不做
+    if (strength < 0.15) {
+      $('alignNote').textContent =
+        `两条声道相关度只有 ${strength.toFixed(2)}，不像同一个声源，没有对轨的意义`;
+      return;
+    }
+
+    state.align = quantizeAlign(r.ms);
+    ensureAudio();
+    render();
+
+    const quality = strength >= 0.5 ? '很稳' : strength >= 0.3 ? '尚可' : '偏弱，建议试听确认';
+    $('alignNote').textContent =
+      `相关度 ${strength.toFixed(2)}（${quality}）· 峰背比 ${Math.round(r.sharpness)}×` +
+      (r.inverted ? ' · ⚠️ 两条声道极性相反，合成会互相抵消' : '');
+  } catch (e) {
+    $('alignNote').textContent = e.message || '分析失败';
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove('busy');
+  }
+}
+
+$('alignBtn').addEventListener('click', autoAlign);
+
+$('alignSlider').addEventListener('input', (e) => {
+  ensureAudio();
+  state.align = sliderToMs(Number(e.target.value) / 1000);
+  render();
+});
+
+// 方向键按**采样**走，不按滑条刻度 —— 滑条是非线性的，一格在两头差着好几毫秒
+$('alignSlider').addEventListener('keydown', (e) => {
+  if (!e.key.startsWith('Arrow')) return;
+  const dir = (e.key === 'ArrowRight' || e.key === 'ArrowUp') ? 1
+            : (e.key === 'ArrowLeft' || e.key === 'ArrowDown') ? -1 : 0;
+  if (!dir) return;
+  e.preventDefault();
+  ensureAudio();
+  state.align = quantizeAlign(state.align + dir * ALIGN_STEP_MS * (e.shiftKey ? 10 : 1));
+  render();
+});
+
+// 点数值归零 —— 对轨值不该被"归零"按钮带走（那个管音色），但自己得有退路
+$('alignValue').addEventListener('click', () => {
+  if (!state.align) return;
+  ensureAudio();
+  state.align = 0;
+  render();
+  $('alignNote').textContent = '已取消对轨';
+});
 
 $('copyBtn').addEventListener('click', copyParams);
 $('pasteBtn').addEventListener('click', pasteParams);
@@ -967,7 +1101,8 @@ $('exportBtn').addEventListener('click', async () => {
   // 用一个全局参数导出会把那些微调抹掉。
   // 没有自己参数的沿用当前面板 —— 那是用户刚调好还没切走的情形。
   const fallback = snapshotParams();
-  const fsRate = ctx ? ctx.sampleRate : 48000;
+  // 服务端会把输出重采样到 48k，所以系数也必须按 48k 算 —— 不能拿 ctx 的率
+  const fsRate = ALIGN_GRID_HZ;
   const filterFor = (i) =>
     ffmpegAudioFilter(state.files[i]?.params || fallback, fsRate);
 

@@ -122,6 +122,21 @@
       <div><span id="balLabel">两轨等量</span><em id="balValue">0</em></div>
     </div>
 
+    <!-- 声道对轨：两条声道的时间差,合成单声道时会变成梳状滤波 -->
+    <div class="align">
+      <div class="align-head">
+        <button id="alignBtn" title="自动测出两条声道的时间差并抵消">
+          <span class="align-spin"></span>自动对轨
+        </button>
+        <span class="align-samples" id="alignSamples"></span>
+        <button class="align-value" id="alignValue" title="点一下取消对轨">未对轨</button>
+      </div>
+      <input id="alignSlider" type="range" min="-1000" max="1000" value="0" step="1"
+             aria-label="手动微调右声道时间">
+      <div class="align-scale"><span>右声道前移</span><span>0</span><span>右声道后移</span></div>
+      <p class="align-note" id="alignNote"></p>
+    </div>
+
     <div class="preset">
       <button id="copyBtn" title="复制当前甜点值 (⌘C)">复制</button>
       <button id="pasteBtn" title="粘贴到选中素材 (⌘V)" disabled>粘贴</button>
