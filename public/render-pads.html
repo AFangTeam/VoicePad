@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<title>Pad 方案渲染</title>
+<style>
+  body {
+    margin: 0; padding: 40px;
+    background: #08090b;
+    color: #9aa2ad;
+    font: 13px/1.5 -apple-system, "PingFang SC", sans-serif;
+    display: flex; flex-direction: column; gap: 64px; align-items: center;
+  }
+  .variant { display: flex; flex-direction: column; align-items: center; gap: 22px; }
+  canvas { width: 320px; height: 320px; }
+  .slider {
+    position: relative; width: 290px; height: 34px;
+    border-radius: 17px; border: 1px solid rgba(255,255,255,0.14);
+    box-shadow: inset 0 1px 2px rgba(0,0,0,0.45);
+  }
+  .knob {
+    position: absolute; top: 50%; width: 26px; height: 26px;
+    margin: -13px 0 0 -13px; border-radius: 50%;
+    background: radial-gradient(circle at 50% 38%, #fff, #e3e6ea 75%);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.55);
+  }
+  .caption { text-align: center; }
+  .caption b { display: block; color: #f2f4f7; font-size: 15px; margin-bottom: 4px; letter-spacing: .3px; }
+  .caption span { font-size: 12px; color: #6d7683; }
+</style>
+</head>
+<body>
+
+<div class="variant" id="va">
+  <canvas width="640" height="640" data-style="a"></canvas>
+  <div class="slider" style="background: linear-gradient(90deg,#5d6470,#8a6a52 45%,#b3766a)">
+    <div class="knob" style="left: 82%"></div>
+  </div>
+  <div class="caption"><b>A · 磨砂彩晕</b><span>最贴近参考图 —— 低饱和彩晕洇在磨砂底上</span></div>
+</div>
+
+<div class="variant" id="vb">
+  <canvas width="640" height="640" data-style="b"></canvas>
+  <div class="slider" style="background: #17191c">
+    <div style="position:absolute;inset:3px auto 3px 3px;width:79%;border-radius:14px;background:linear-gradient(90deg,rgba(240,164,74,.14),rgba(240,164,74,.4))"></div>
+    <div class="knob" style="left: 82%"></div>
+  </div>
+  <div class="caption"><b>B · 极简中性</b><span>点阵无色，全部色彩只活在 puck 的光晕里</span></div>
+</div>
+
+<div class="variant" id="vc">
+  <canvas width="640" height="640" data-style="c"></canvas>
+  <div class="slider" style="background: linear-gradient(90deg,#3a3f46,#f0a44a)">
+    <div class="knob" style="left: 82%"></div>
+  </div>
+  <div class="caption"><b>C · 语义冷暖</b><span>上冷下暖直接画在点阵里 —— 方向即色温</span></div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────
+// 三个方案共用同一套骨架：圆角方形 + 点阵 + 靠近 puck 的点
+// 放大变亮（参考图的核心手感）+ 中心基准环 + 白色 puck。
+// 差别只在配色策略 —— 选定后这份绘制函数原样搬进 app。
+// ─────────────────────────────────────────────────────────
+
+const PUCK = { x: 0.30, y: 0.71 };   // 和参考图一致：左下
+const GRID = 11;                      // 11×11 点阵
+const DPR = 2;
+
+function roundedRectPath(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function draw(canvas) {
+  const style = canvas.dataset.style;
+  const ctx = canvas.getContext('2d');
+  const S = canvas.width;             // 640 (= 320 @2x)
+  const R = S * 0.215;                // 圆角半径，squircle 观感
+
+  ctx.clearRect(0, 0, S, S);
+  roundedRectPath(ctx, 0, 0, S, S, R);
+  ctx.save();
+  ctx.clip();
+
+  // ── 底色 ──
+  const base = ctx.createLinearGradient(0, 0, 0, S);
+  if (style === 'a') { base.addColorStop(0, '#413a3d'); base.addColorStop(1, '#2b2527'); }
+  if (style === 'b') { base.addColorStop(0, '#191c20'); base.addColorStop(1, '#0f1114'); }
+  if (style === 'c') { base.addColorStop(0, '#1b1d21'); base.addColorStop(1, '#111316'); }
+  ctx.fillStyle = base;
+  ctx.fillRect(0, 0, S, S);
+
+  // ── 彩晕 ──
+  const wash = (fx, fy, fr, color) => {
+    const g = ctx.createRadialGradient(fx * S, fy * S, 0, fx * S, fy * S, fr * S);
+    g.addColorStop(0, color);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, S, S);
+  };
+  if (style === 'a') {
+    wash(0.22, 0.86, 0.85, 'rgba(206,122,112,0.36)');   // 左下 暖粉
+    wash(0.88, 0.10, 0.80, 'rgba(148,164,128,0.32)');   // 右上 灰绿
+    wash(0.12, 0.10, 0.62, 'rgba(122,128,146,0.26)');   // 左上 冷灰
+  }
+  if (style === 'c') {
+    wash(0.5, -0.08, 0.95, 'rgba(142,186,255,0.17)');   // 顶 冷
+    wash(0.5, 1.08, 0.95, 'rgba(242,158,70,0.22)');     // 底 暖
+  }
+
+  // ── puck 光晕（B/C 用；A 靠彩晕本身）──
+  if (style === 'b') wash(PUCK.x, PUCK.y, 0.42, 'rgba(240,164,74,0.30)');
+  if (style === 'c') wash(PUCK.x, PUCK.y, 0.40, 'rgba(246,149,72,0.26)');
+
+  // ── 点阵：靠近 puck 的点放大、变亮 ──
+  const margin = S * 0.085;
+  const span = S - margin * 2;
+  const sigma = S * 0.20;
+  const baseR = S * 0.008;
+
+  for (let row = 0; row < GRID; row++) {
+    for (let col = 0; col < GRID; col++) {
+      const x = margin + (col / (GRID - 1)) * span;
+      const y = margin + (row / (GRID - 1)) * span;
+      const d = Math.hypot(x - PUCK.x * S, y - PUCK.y * S);
+      const swell = Math.exp(-(d * d) / (2 * sigma * sigma));
+
+      const r = baseR * (1 + 2.6 * swell);
+      let alpha, rgb;
+      if (style === 'a') {
+        rgb = '255,255,255';
+        alpha = 0.26 + 0.62 * swell;
+      } else if (style === 'b') {
+        rgb = '186,196,208';
+        alpha = 0.20 + 0.20 * swell;
+        // B 的点靠近 puck 时染上活色
+        if (swell > 0.08) {
+          const t = Math.min(1, swell * 1.4);
+          rgb = `${186 + (240-186)*t|0},${196 + (164-196)*t|0},${208 + (74-208)*t|0}`;
+          alpha = 0.20 + 0.7 * swell;
+        }
+      } else {
+        // C：点色按行从冷到暖
+        const t = row / (GRID - 1);
+        rgb = `${180 + (242-180)*t|0},${204 + (180-204)*t|0},${236 + (122-236)*t|0}`;
+        alpha = 0.24 + 0.60 * swell;
+      }
+
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${rgb},${alpha})`;
+      ctx.fill();
+    }
+  }
+
+  // ── 中心基准环 ──
+  ctx.beginPath();
+  ctx.arc(S / 2, S / 2, S * 0.014, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+
+  ctx.restore();
+
+  // ── 外描边（磨砂玻璃边缘）──
+  roundedRectPath(ctx, 1.5, 1.5, S - 3, S - 3, R);
+  ctx.strokeStyle = style === 'a' ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.10)';
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  // ── puck ──
+  const px = PUCK.x * S, py = PUCK.y * S, pr = S * 0.088;
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.6)';
+  ctx.shadowBlur = S * 0.035;
+  ctx.shadowOffsetY = S * 0.008;
+  const pg = ctx.createRadialGradient(px, py - pr * 0.35, 0, px, py, pr);
+  pg.addColorStop(0, '#ffffff');
+  pg.addColorStop(1, '#e7eaee');
+  ctx.beginPath();
+  ctx.arc(px, py, pr, 0, Math.PI * 2);
+  ctx.fillStyle = pg;
+  ctx.fill();
+  ctx.restore();
+}
+
+document.querySelectorAll('canvas').forEach(draw);
+</script>
+</body>
+</html>

@@ -295,18 +295,121 @@ function liveColor() {
   return blendHex('#f0a44a', '#ff7a45', -t * 0.55);              // 磁性 → 深暖
 }
 
+// ── 点阵 pad（方案 C · 语义冷暖）────────────────────────────
+//
+// 参考 Final Cut Camera 的调色 pad：圆角方形 + 点阵，靠近 puck 的点
+// 放大变亮；点色按行从冷白（上 = 通透）渐到琥珀（下 = 磁性）——
+// 颜色不是装饰，是方向语义本身，不读字也知道往哪拽是什么音色。
+
+const padCanvas = $('padCanvas');
+const padCtx = padCanvas.getContext('2d');
+const PAD_GRID = 11;
+
+function roundedRectPath(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r);
+  c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r);
+  c.arcTo(x, y, x + w, y, r);
+  c.closePath();
+}
+
+function drawPad() {
+  const cssSize = pad.clientWidth;
+  if (cssSize < 10) return;
+  const dpr = window.devicePixelRatio || 1;
+  const S = Math.round(cssSize * dpr);
+  if (padCanvas.width !== S) { padCanvas.width = S; padCanvas.height = S; }
+
+  const c = padCtx;
+  const R = S * 0.215;
+  // puck 的归一化位置（0..1，原点左上）
+  const nx = 0.5 + state.balance * 0.42;
+  const ny = 0.5 - state.tone * 0.42;
+
+  c.clearRect(0, 0, S, S);
+  roundedRectPath(c, 0, 0, S, S, R);
+  c.save();
+  c.clip();
+
+  // 底色
+  const base = c.createLinearGradient(0, 0, 0, S);
+  base.addColorStop(0, '#1b1d21');
+  base.addColorStop(1, '#111316');
+  c.fillStyle = base;
+  c.fillRect(0, 0, S, S);
+
+  // 上冷下暖的语义洇染
+  const wash = (fx, fy, fr, color) => {
+    const g = c.createRadialGradient(fx * S, fy * S, 0, fx * S, fy * S, fr * S);
+    g.addColorStop(0, color);
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    c.fillStyle = g;
+    c.fillRect(0, 0, S, S);
+  };
+  wash(0.5, -0.08, 0.95, 'rgba(142,186,255,0.17)');
+  wash(0.5, 1.08, 0.95, 'rgba(242,158,70,0.22)');
+
+  // puck 周围的活色光晕（强度随偏移量走）
+  const deflect = Math.min(1, Math.hypot(state.balance, state.tone));
+  if (deflect > 0.02) {
+    const live = getComputedStyle(document.documentElement)
+      .getPropertyValue('--live').trim() || '#f0a44a';
+    wash(nx, ny, 0.4, `${live}${Math.round(66 * deflect).toString(16).padStart(2, '0')}`);
+  }
+
+  // 点阵
+  const margin = S * 0.085;
+  const span = S - margin * 2;
+  const sigma = S * 0.20;
+  const baseR = S * 0.008;
+  const px = nx * S, py = ny * S;
+
+  for (let row = 0; row < PAD_GRID; row++) {
+    const t = row / (PAD_GRID - 1);
+    // 冷白 → 琥珀
+    const rr = 180 + (242 - 180) * t | 0;
+    const gg = 204 + (180 - 204) * t | 0;
+    const bb = 236 + (122 - 236) * t | 0;
+    for (let col = 0; col < PAD_GRID; col++) {
+      const x = margin + (col / (PAD_GRID - 1)) * span;
+      const y = margin + (row / (PAD_GRID - 1)) * span;
+      const d = Math.hypot(x - px, y - py);
+      const swell = Math.exp(-(d * d) / (2 * sigma * sigma));
+      c.beginPath();
+      c.arc(x, y, baseR * (1 + 2.6 * swell), 0, Math.PI * 2);
+      c.fillStyle = `rgba(${rr},${gg},${bb},${(0.24 + 0.6 * swell).toFixed(3)})`;
+      c.fill();
+    }
+  }
+
+  // 中心基准环
+  c.beginPath();
+  c.arc(S / 2, S / 2, S * 0.014, 0, Math.PI * 2);
+  c.strokeStyle = 'rgba(255,255,255,0.5)';
+  c.lineWidth = Math.max(1.5, S * 0.004);
+  c.stroke();
+
+  c.restore();
+
+  // 边框
+  roundedRectPath(c, dpr, dpr, S - dpr * 2, S - dpr * 2, R);
+  c.strokeStyle = 'rgba(255,255,255,0.10)';
+  c.lineWidth = dpr * 1.4;
+  c.stroke();
+}
+
 function render() {
   const pad = $('pad');
   document.documentElement.style.setProperty('--live', liveColor());
-  const r = pad.clientWidth / 2;
-  // puck 限制在半径内 —— 圆形面板，超出去看着就是坏的
-  const px = r + state.balance * r * 0.84;
-  const py = r - state.tone * r * 0.84;
+  const w = pad.clientWidth;
+  // 方形面板：两轴各自独立，角落 = 两个维度同时拉满（语义成立：明亮 + 全左）
+  const px = w * (0.5 + state.balance * 0.42);
+  const py = w * (0.5 - state.tone * 0.42);
   $('puck').style.left = `${px}px`;
   $('puck').style.top = `${py}px`;
-  $('padGlow').style.left = `${px}px`;
-  $('padGlow').style.top = `${py}px`;
-  $('padGlow').style.opacity = Math.min(1, Math.hypot(state.balance, state.tone));
+  drawPad();
 
   // puck 靠近哪一侧，就把那一侧的提示淡掉
   const near = Math.abs(state.tone) > Math.abs(state.balance)
@@ -330,12 +433,11 @@ const pad = $('pad');
 
 function padUpdate(e) {
   const rect = pad.getBoundingClientRect();
-  const r = rect.width / 2;
-  let dx = (e.clientX - rect.left - r) / (r * 0.84);
-  let dy = (e.clientY - rect.top - r) / (r * 0.84);
-  // 夹在单位圆内，保持圆形面板的语义（角落不该比边缘更极端）
-  const len = Math.hypot(dx, dy);
-  if (len > 1) { dx /= len; dy /= len; }
+  if (rect.width < 1) return;
+  // 方形面板：每轴独立夹取。0.42 是点阵可视范围的半宽，
+  // 和 render() 里的正向映射必须是同一个数，否则 puck 会跟不上手指
+  const dx = (e.clientX - rect.left - rect.width / 2) / (rect.width * 0.42);
+  const dy = (e.clientY - rect.top - rect.height / 2) / (rect.height * 0.42);
   state.balance = Math.max(-1, Math.min(1, dx));
   state.tone = Math.max(-1, Math.min(1, -dy));
   render();
