@@ -20,8 +20,11 @@
 //
 
 import { createServer } from 'http';
-import { createReadStream, statSync, readdirSync, existsSync } from 'fs';
+import { createReadStream, createWriteStream, statSync, readdirSync, existsSync, mkdirSync, rmSync } from 'fs';
 import { spawn, execFile } from 'child_process';
+import { pipeline } from 'stream/promises';
+import { randomUUID } from 'crypto';
+import { tmpdir } from 'os';
 import { extname, join, resolve, basename, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
@@ -29,6 +32,12 @@ import { homedir } from 'os';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(__dirname, 'public');
 const PORT = Number(process.env.PORT || 5178);
+
+// 拖放进来的文件浏览器不给绝对路径（`File.path` 是 Electron 才有的），
+// 所以只能先上传到这里，再由 ffmpeg 就地处理。
+const UPLOAD_DIR = join(tmpdir(), 'voicepad-uploads');
+// 上传来的素材没有"源文件夹"可言，导出统一落这里
+const DROP_OUTPUT_DIR = join(homedir(), 'Movies', 'VoicePad');
 
 const VIDEO_EXT = new Set(['.mp4', '.mov', '.m4v', '.mkv', '.avi', '.mts', '.m2ts', '.webm']);
 const MIME = {
@@ -137,10 +146,18 @@ function streamMedia(req, res, path) {
  *
  * 输出到源文件旁边的 `<原名>_voicepad.<后缀>`，**不覆盖原文件**。
  */
-function exportOne(input, filter, onProgress) {
+function exportOne(input, filter, onProgress, opts = {}) {
   return new Promise((ok, fail) => {
     const ext = extname(input);
-    const out = join(dirname(input), `${basename(input, ext)}_voicepad${ext}`);
+    const stem = (opts.displayName ? basename(opts.displayName, extname(opts.displayName))
+                                   : basename(input, ext));
+    const dir = opts.outDir || dirname(input);
+    mkdirSync(dir, { recursive: true });
+
+    // 重名不覆盖：追加 _1 / _2。批量跑两遍不该悄悄盖掉上一次的成果
+    let out = join(dir, `${stem}_voicepad${ext}`);
+    let n = 1;
+    while (existsSync(out)) out = join(dir, `${stem}_voicepad_${n++}${ext}`);
 
     const args = [
       '-y', '-hide_banner', '-loglevel', 'error', '-progress', 'pipe:1', '-nostats',
@@ -192,18 +209,64 @@ async function handleExport(req, res) {
 
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
-    send({ type: 'start', index: i, name: basename(f.path) });
+    send({ type: 'start', index: i, name: f.name || basename(f.path) });
     try {
       const out = await exportOne(f.path, filter, (sec) => {
         send({ type: 'progress', index: i, seconds: sec, duration: f.duration || null });
+      }, {
+        // 上传来的素材没有源文件夹，统一落 ~/Movies/VoicePad
+        outDir: f.uploaded ? DROP_OUTPUT_DIR : undefined,
+        displayName: f.name,
       });
       send({ type: 'done', index: i, output: out });
+      // 临时上传件用完即删，不留几个 GB 在 /tmp 里
+      if (f.uploaded) { try { rmSync(f.path, { force: true }); } catch { /* 忽略 */ } }
     } catch (e) {
       send({ type: 'error', index: i, message: e.message });
+      if (f.uploaded) { try { rmSync(f.path, { force: true }); } catch { /* 忽略 */ } }
     }
   }
   send({ type: 'all-done' });
   res.end();
+}
+
+// ── 上传（拖放进来的素材）─────────────────────────────────────
+
+/**
+ * 把请求体直接流式落盘。
+ *
+ * 不用 multipart —— 那要么引依赖要么自己写解析器，而这里只需要传一个文件。
+ * 文件名放在头里，正文就是裸字节，服务端 pipe 到临时文件即可，
+ * 内存占用恒定，几个 GB 也不会撑爆。
+ */
+async function handleUpload(req, res) {
+  const raw = req.headers['x-filename'];
+  if (!raw) return json(res, 400, { error: '缺少文件名' });
+
+  let name;
+  try { name = basename(decodeURIComponent(raw)); }
+  catch { return json(res, 400, { error: '文件名编码有误' }); }
+
+  const ext = extname(name).toLowerCase();
+  if (!VIDEO_EXT.has(ext)) return json(res, 400, { error: `不支持的格式：${ext || '(无扩展名)'}` });
+
+  mkdirSync(UPLOAD_DIR, { recursive: true });
+  const dest = join(UPLOAD_DIR, `${randomUUID()}${ext}`);
+
+  try {
+    await pipeline(req, createWriteStream(dest));
+  } catch (e) {
+    try { rmSync(dest, { force: true }); } catch { /* 忽略 */ }
+    return json(res, 500, { error: `上传失败：${e.message}` });
+  }
+
+  return json(res, 200, {
+    path: dest,
+    name,
+    size: statSync(dest).size,
+    duration: await ffprobeDuration(dest),
+    uploaded: true,
+  });
 }
 
 // ── 路由 ────────────────────────────────────────────────────
@@ -232,6 +295,14 @@ const server = createServer(async (req, res) => {
       if (!p) return json(res, 400, { error: '缺少路径' });
       return streamMedia(req, res, p);
     }
+    if (url.pathname === '/api/upload' && req.method === 'POST') {
+      return await handleUpload(req, res);
+    }
+    if (url.pathname === '/api/reveal' && req.method === 'POST') {
+      const p = url.searchParams.get('path');
+      if (p && existsSync(p)) execFile('open', ['-R', p], () => {});
+      return json(res, 200, { ok: true });
+    }
     if (url.pathname === '/api/export' && req.method === 'POST') {
       return await handleExport(req, res);
     }
@@ -240,6 +311,13 @@ const server = createServer(async (req, res) => {
     return json(res, 500, { error: e.message });
   }
 });
+
+// 启动时清一次上传暂存区。
+// 导出成功/失败都会删自己那份，但用户中途关页面的那些会留下来 ——
+// 几个 GB 的视频堆在 /tmp 里不清就是纯浪费。
+try {
+  if (existsSync(UPLOAD_DIR)) rmSync(UPLOAD_DIR, { recursive: true, force: true });
+} catch { /* 忽略 */ }
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`\n  VoicePad  →  http://localhost:${PORT}\n`);

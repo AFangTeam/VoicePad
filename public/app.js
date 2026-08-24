@@ -365,9 +365,21 @@ function open(i) {
   if (!f) return;
   state.current = i;
   ensureAudio();
-  video.src = `/api/media?path=${encodeURIComponent(f.path)}`;
+
+  // 两种来源：
+  //   拖进来的 → File 对象，直接 blob URL，瞬时可播、不经服务端
+  //   文件夹里的 → 走 /api/media，服务端按 Range 流式给
+  if (f.file) {
+    if (f.blobURL) URL.revokeObjectURL(f.blobURL);
+    f.blobURL = URL.createObjectURL(f.file);
+    video.src = f.blobURL;
+  } else {
+    video.src = `/api/media?path=${encodeURIComponent(f.path)}`;
+  }
+
   video.play().catch(() => {});
   document.querySelector('.viewer').classList.add('has-video');
+  $('transport').hidden = false;
   renderClips();
 }
 
@@ -408,12 +420,8 @@ $('selectAll').addEventListener('change', (e) => {
 // ── 导出 ────────────────────────────────────────────────────
 
 $('exportBtn').addEventListener('click', async () => {
-  const picked = [...state.selected].sort((a, b) => a - b).map((i) => ({
-    index: i,
-    path: state.files[i].path,
-    duration: state.files[i].duration,
-  }));
-  if (!picked.length) return;
+  const chosen = [...state.selected].sort((a, b) => a - b);
+  if (!chosen.length) return;
 
   // 导出用的滤镜串由**同一个 dsp.js**生成，和预览听到的是同一套系数
   const filter = ffmpegAudioFilter(
@@ -425,6 +433,50 @@ $('exportBtn').addEventListener('click', async () => {
   $('progress').hidden = false;
   document.querySelectorAll('.state').forEach((el) => { el.textContent = ''; el.className = 'state'; });
 
+  // 拖进来的素材浏览器不给绝对路径，服务端读不到，只能先传上去。
+  // 文件夹模式的素材本来就在服务端，跳过这一步（几个 GB 不用白搬）。
+  const picked = [];
+  try {
+    for (let k = 0; k < chosen.length; k++) {
+      const i = chosen[k];
+      const f = state.files[i];
+      if (f.path) {
+        picked.push({ index: i, path: f.path, duration: f.duration, name: f.name });
+        continue;
+      }
+      $('progressText').textContent = `上传 ${f.name}（${k + 1}/${chosen.length}）`;
+      $('progressText').classList.add('uploading');
+      $('progressFill').style.width = `${(k / chosen.length) * 100}%`;
+      const el = document.querySelector(`.state[data-index="${i}"]`);
+      if (el) el.textContent = '上传中';
+
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        headers: {
+          'X-Filename': encodeURIComponent(f.name),
+          'Content-Type': 'application/octet-stream',
+        },
+        body: f.file,
+        duplex: 'half',
+      });
+      const info = await res.json();
+      if (!res.ok) throw new Error(info.error || '上传失败');
+      picked.push({
+        index: i, path: info.path, duration: info.duration ?? f.duration,
+        name: f.name, uploaded: true,
+      });
+      if (el) el.textContent = '待导出';
+    }
+  } catch (err) {
+    toast(err.message || '上传失败');
+    $('exportBtn').disabled = false;
+    $('progress').hidden = true;
+    $('progressText').classList.remove('uploading');
+    return;
+  }
+  $('progressText').classList.remove('uploading');
+  $('progressFill').style.width = '0';
+
   let doneCount = 0;
   const res = await fetch('/api/export', {
     method: 'POST',
@@ -432,6 +484,7 @@ $('exportBtn').addEventListener('click', async () => {
     body: JSON.stringify({ files: picked, filter }),
   });
 
+  let lastOutput = null;
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -460,6 +513,7 @@ $('exportBtn').addEventListener('click', async () => {
         $('progressFill').style.width = `${overall * 100}%`;
       } else if (msg.type === 'done') {
         doneCount++;
+        lastOutput = msg.output;
         const el = stateEl(real); if (el) { el.textContent = '已导出'; el.className = 'state ok'; }
         $('progressFill').style.width = `${(doneCount / picked.length) * 100}%`;
       } else if (msg.type === 'error') {
@@ -468,12 +522,185 @@ $('exportBtn').addEventListener('click', async () => {
         toast(msg.message);
       } else if (msg.type === 'all-done') {
         $('progressText').textContent = '完成';
-        toast(`导出完成，文件在素材旁边（_voicepad 后缀）`);
+        const where = picked.some((p) => p.uploaded)
+          ? '已存到「影片 / VoicePad」'
+          : '已存到素材旁边（_voicepad 后缀）';
+        toast(`导出完成，${where}`);
+        // 帮用户把成果在 Finder 里点出来，省得自己去找
+        if (lastOutput) {
+          fetch(`/api/reveal?path=${encodeURIComponent(lastOutput)}`, { method: 'POST' }).catch(() => {});
+        }
         setTimeout(() => { $('progress').hidden = true; $('progressFill').style.width = '0'; }, 1600);
       }
     }
   }
   $('exportBtn').disabled = false;
+});
+
+// ── 播放进度 ────────────────────────────────────────────────
+
+const scrub = $('scrub');
+let scrubbing = false;
+/** 拖动期间不让 timeupdate 回写，否则进度条会和手指打架 */
+let scrubPreview = 0;
+
+const fmtTime = (s) => {
+  if (!isFinite(s) || s < 0) s = 0;
+  const m = Math.floor(s / 60);
+  return `${m}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+};
+
+function paintTransport() {
+  const dur = video.duration;
+  const cur = scrubbing ? scrubPreview : video.currentTime;
+  const pct = (isFinite(dur) && dur > 0) ? (cur / dur) * 100 : 0;
+
+  $('scrubFill').style.width = `${pct}%`;
+  $('scrubKnob').style.left = `${pct}%`;
+  $('timeNow').textContent = fmtTime(cur);
+  $('timeTotal').textContent = fmtTime(dur);
+
+  // 已缓冲到哪儿 —— 大文件边下边播时有个交代
+  if (video.buffered.length && isFinite(dur) && dur > 0) {
+    const end = video.buffered.end(video.buffered.length - 1);
+    $('scrubBuffer').style.width = `${Math.min(100, (end / dur) * 100)}%`;
+  }
+}
+
+function seekFromPointer(e) {
+  const r = scrub.getBoundingClientRect();
+  // 宽度为 0 时（窗口极窄 / 还没布局完）除法会得到 Infinity，
+  // 夹完就是 1 —— 一按就跳片尾。这种"看起来只是边界情况"的除零最坑人
+  if (r.width < 1) return;
+  const ratio = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  const dur = video.duration;
+  if (!isFinite(dur) || dur <= 0) return;
+  scrubPreview = ratio * dur;
+  // 拖动期间实时 seek —— 所见即所听，比松手才跳更好用
+  video.currentTime = scrubPreview;
+  paintTransport();
+}
+
+scrub.addEventListener('pointerdown', (e) => {
+  ensureAudio();
+  scrubbing = true;
+  scrub.classList.add('dragging');
+  try { scrub.setPointerCapture(e.pointerId); } catch { /* 忽略 */ }
+  seekFromPointer(e);
+});
+scrub.addEventListener('pointermove', (e) => { if (scrubbing) seekFromPointer(e); });
+const endScrub = (e) => {
+  if (!scrubbing) return;
+  scrubbing = false;
+  scrub.classList.remove('dragging');
+  try { scrub.releasePointerCapture(e.pointerId); } catch { /* 忽略 */ }
+};
+scrub.addEventListener('pointerup', endScrub);
+scrub.addEventListener('pointercancel', endScrub);
+window.addEventListener('pointerup', endScrub);
+
+video.addEventListener('timeupdate', paintTransport);
+video.addEventListener('loadedmetadata', paintTransport);
+video.addEventListener('progress', paintTransport);
+video.addEventListener('play', () => { $('playIcon').innerHTML = '<path d="M6 5h4v14H6zM14 5h4v14h-4z"/>'; });
+video.addEventListener('pause', () => { $('playIcon').innerHTML = '<path d="M8 5v14l11-7z"/>'; });
+
+$('playBtn').addEventListener('click', () => {
+  ensureAudio();
+  video.paused ? video.play() : video.pause();
+});
+
+// ── 拖放载入 ────────────────────────────────────────────────
+
+const stage = document.querySelector('.stage');
+let dragDepth = 0;   // dragenter/leave 会在子元素间反复触发，用计数才不闪
+
+['dragenter', 'dragover'].forEach((ev) => {
+  stage.addEventListener(ev, (e) => {
+    if (!e.dataTransfer?.types.includes('Files')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    if (ev === 'dragenter') dragDepth++;
+    stage.classList.add('dragover');
+  });
+});
+
+stage.addEventListener('dragleave', () => {
+  if (--dragDepth <= 0) { dragDepth = 0; stage.classList.remove('dragover'); }
+});
+
+stage.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  stage.classList.remove('dragover');
+  const files = await collectFiles(e.dataTransfer);
+  loadLocalFiles(files);
+});
+
+const VIDEO_RE = /\.(mp4|mov|m4v|mkv|avi|mts|m2ts|webm)$/i;
+
+/** 支持拖文件夹：webkitGetAsEntry 能递归枚举 */
+async function collectFiles(dt) {
+  const entries = [...(dt.items || [])]
+    .map((it) => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null))
+    .filter(Boolean);
+
+  if (!entries.length) return [...dt.files].filter((f) => VIDEO_RE.test(f.name));
+
+  const out = [];
+  const walk = (entry) => new Promise((done) => {
+    if (entry.isFile) {
+      entry.file((f) => { if (VIDEO_RE.test(f.name)) out.push(f); done(); }, done);
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const readBatch = () => reader.readEntries(async (batch) => {
+        // readEntries 一次最多给 100 条，必须反复读到空为止
+        if (!batch.length) return done();
+        for (const child of batch) await walk(child);
+        readBatch();
+      }, done);
+      readBatch();
+    } else done();
+  });
+
+  for (const entry of entries) await walk(entry);
+  return out;
+}
+
+function loadLocalFiles(files) {
+  if (!files.length) return toast('没找到可用的视频文件');
+  state.files = files.map((f) => ({
+    name: f.name, file: f, size: f.size, duration: null, path: null,
+  }));
+  state.selected = new Set(state.files.map((_, i) => i));
+  state.current = -1;
+  $('clips').hidden = false;
+  renderClips();
+  open(0);
+  // 时长要等元数据，逐条探完再刷新列表
+  probeDurations();
+}
+
+/** 用一个隐藏的 <video> 把每条的时长读出来 */
+async function probeDurations() {
+  for (const item of state.files) {
+    if (!item.file || item.duration != null) continue;
+    item.duration = await new Promise((done) => {
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      const url = URL.createObjectURL(item.file);
+      v.onloadedmetadata = () => { URL.revokeObjectURL(url); done(isFinite(v.duration) ? v.duration : null); };
+      v.onerror = () => { URL.revokeObjectURL(url); done(null); };
+      v.src = url;
+    });
+    renderClips();
+  }
+}
+
+$('pickFiles').addEventListener('click', () => $('fileInput').click());
+$('fileInput').addEventListener('change', (e) => {
+  loadLocalFiles([...e.target.files].filter((f) => VIDEO_RE.test(f.name)));
+  e.target.value = '';
 });
 
 // ── 杂项 ────────────────────────────────────────────────────

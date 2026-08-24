@@ -447,3 +447,163 @@ input[type=range]:active::-webkit-slider-thumb { background: var(--accent); curs
 @media (prefers-reduced-motion: reduce) {
   * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }
+
+/* ── 头部操作区 ─────────────────────────────────────── */
+
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-end;
+}
+
+.ghost { background: transparent; }
+
+.path-mode { position: relative; }
+
+.path-mode summary {
+  list-style: none;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-3);
+  padding: 6px 4px;
+  user-select: none;
+  transition: color 0.14s var(--ease);
+}
+
+.path-mode summary::-webkit-details-marker { display: none; }
+.path-mode summary:hover { color: var(--text-2); }
+.path-mode[open] summary { color: var(--accent); }
+
+.path-mode .picker {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  width: 460px;
+  max-width: 60vw;
+  padding: 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 12px 34px rgba(0,0,0,0.55);
+  z-index: 20;
+}
+
+/* ── 拖放 ───────────────────────────────────────────── */
+
+.dropveil {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(12, 13, 15, 0.86);
+  backdrop-filter: blur(8px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s var(--ease);
+  z-index: 10;
+}
+
+.stage.dragover .dropveil { opacity: 1; }
+
+.dropveil-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: var(--accent);
+  padding: 30px 44px;
+  border: 1.5px dashed var(--accent);
+  border-radius: 18px;
+  background: var(--accent-dim);
+}
+
+.dropveil-inner p { font-size: 13px; letter-spacing: 0.4px; }
+
+/* ── 播放进度 ───────────────────────────────────────── */
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 20px;
+  border-top: 1px solid var(--line-soft);
+  background: var(--surface);
+}
+
+.icon-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  flex: none;
+}
+
+.time {
+  font-size: 11px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  min-width: 38px;
+  text-align: center;
+  flex: none;
+}
+
+.scrub {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.scrub-track {
+  position: relative;
+  width: 100%;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+  transition: height 0.14s var(--ease);
+}
+
+.scrub:hover .scrub-track,
+.scrub.dragging .scrub-track { height: 5px; }
+
+.scrub-buffer, .scrub-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  display: block;
+  border-radius: 2px;
+}
+
+/* 已缓冲区间 —— 大文件边下边播时能看出还剩多少 */
+.scrub-buffer { background: rgba(255,255,255,0.12); width: 0; }
+.scrub-fill { background: var(--accent); width: 0; }
+
+.scrub-knob {
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  margin-left: -5.5px;
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 1px 5px rgba(0,0,0,0.6);
+  left: 0;
+  opacity: 0;
+  transition: opacity 0.14s var(--ease), transform 0.14s var(--ease);
+  pointer-events: none;
+}
+
+.scrub:hover .scrub-knob,
+.scrub.dragging .scrub-knob { opacity: 1; }
+.scrub.dragging .scrub-knob { transform: scale(1.25); background: var(--accent); }
+
+/* 上传进度用同一套进度条样式 */
+.progress span.uploading { color: var(--accent); }

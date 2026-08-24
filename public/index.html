@@ -17,19 +17,55 @@
         <span class="dot"></span>
         VoicePad
       </div>
-      <form class="picker" id="picker">
-        <input id="dir" type="text" spellcheck="false"
-               placeholder="粘贴素材文件夹路径，回车打开" autocomplete="off">
-        <button type="submit">打开</button>
-      </form>
+      <div class="head-actions">
+        <button id="pickFiles" class="ghost">选择文件…</button>
+        <details class="path-mode">
+          <summary>用文件夹路径</summary>
+          <form class="picker" id="picker">
+            <input id="dir" type="text" spellcheck="false"
+                   placeholder="粘贴文件夹路径，回车打开（就地导出，不拷贝）" autocomplete="off">
+            <button type="submit">打开</button>
+          </form>
+        </details>
+      </div>
+      <input id="fileInput" type="file" accept="video/*" multiple hidden>
     </header>
 
     <section class="viewer">
       <video id="video" playsinline></video>
       <div class="viewer-empty" id="viewerEmpty">
-        <p>打开一个文件夹开始</p>
-        <span>批量载入其中的视频，右侧调音、一键导出</span>
+        <p>把视频拖进来</p>
+        <span>可以一次拖多个，或整个文件夹</span>
       </div>
+
+      <!-- 拖放高亮。覆盖整个左侧，拖到哪儿都能松手 -->
+      <div class="dropveil" id="dropveil">
+        <div class="dropveil-inner">
+          <svg width="34" height="34" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+            <path d="M12 16V4m0 0L7 9m5-5 5 5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+          </svg>
+          <p>松手载入</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 播放进度 -->
+    <section class="transport" id="transport" hidden>
+      <button id="playBtn" class="icon-btn" aria-label="播放 / 暂停">
+        <svg id="playIcon" width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M8 5v14l11-7z"/>
+        </svg>
+      </button>
+      <span class="time" id="timeNow">0:00</span>
+      <div class="scrub" id="scrub">
+        <div class="scrub-track">
+          <i class="scrub-buffer" id="scrubBuffer"></i>
+          <i class="scrub-fill" id="scrubFill"></i>
+        </div>
+        <div class="scrub-knob" id="scrubKnob"></div>
+      </div>
+      <span class="time" id="timeTotal">0:00</span>
     </section>
 
     <section class="clips" id="clips" hidden>
