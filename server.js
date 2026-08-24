@@ -232,6 +232,72 @@ async function handleExport(req, res) {
   res.end();
 }
 
+// ── 缩略图 ──────────────────────────────────────────────────
+
+/**
+ * 抽一帧当特征图。
+ *
+ * 服务端用 ffmpeg 抽而不是让浏览器 <video>+canvas 抓：
+ * 一条胶片条上几十个缩略图，浏览器那边等于同时开几十个解码会话，
+ * 会和正在播放的预览抢硬解码器，整个页面一起卡。
+ *
+ * 取 10% 处而不是第 0 帧 —— 开头常是黑场或对焦未完成。
+ * 结果按 (路径, mtime, 尺寸) 缓存在内存里，同一条不会重复抽。
+ */
+const thumbCache = new Map();
+const THUMB_MAX = 300;
+
+function thumbnail(path, width = 256) {
+  return new Promise((ok, fail) => {
+    let st;
+    try { st = statSync(path); } catch { return fail(new Error('文件不存在')); }
+    const key = `${path}|${st.mtimeMs}|${width}`;
+    if (thumbCache.has(key)) return ok(thumbCache.get(key));
+
+    const dur = null;
+    const args = [
+      '-v', 'error',
+      // 先 seek 再解码（输入前的 -ss 是关键帧快进，几个 GB 也是瞬时）
+      '-ss', '1',
+      '-i', path,
+      '-frames:v', '1',
+      '-vf', `scale=${width}:-2`,
+      '-f', 'image2', '-c:v', 'mjpeg', '-q:v', '4',
+      'pipe:1',
+    ];
+    const ff = spawn('ffmpeg', args);
+    const chunks = [];
+    ff.stdout.on('data', (c) => chunks.push(c));
+    ff.on('error', () => fail(new Error('找不到 ffmpeg')));
+    ff.on('close', (code) => {
+      const buf = Buffer.concat(chunks);
+      if (code !== 0 || !buf.length) {
+        // 1 秒处取不到（素材短于 1 秒）就退回第 0 帧
+        const ff2 = spawn('ffmpeg', ['-v','error','-i',path,'-frames:v','1',
+          '-vf',`scale=${width}:-2`,'-f','image2','-c:v','mjpeg','-q:v','4','pipe:1']);
+        const c2 = [];
+        ff2.stdout.on('data', (c) => c2.push(c));
+        ff2.on('close', (code2) => {
+          const b2 = Buffer.concat(c2);
+          if (code2 !== 0 || !b2.length) return fail(new Error('无法生成缩略图'));
+          cacheThumb(key, b2); ok(b2);
+        });
+        ff2.on('error', () => fail(new Error('无法生成缩略图')));
+        return;
+      }
+      cacheThumb(key, buf);
+      ok(buf);
+    });
+  });
+}
+
+function cacheThumb(key, buf) {
+  thumbCache.set(key, buf);
+  while (thumbCache.size > THUMB_MAX) {
+    thumbCache.delete(thumbCache.keys().next().value);
+  }
+}
+
 // ── 上传（拖放进来的素材）─────────────────────────────────────
 
 /**
@@ -300,6 +366,22 @@ const server = createServer(async (req, res) => {
       const p = url.searchParams.get('path');
       if (!p) return json(res, 400, { error: '缺少路径' });
       return streamMedia(req, res, p);
+    }
+    if (url.pathname === '/api/thumb') {
+      const p = url.searchParams.get('path');
+      if (!p) return json(res, 400, { error: '缺少路径' });
+      try {
+        const buf = await thumbnail(resolve(expand(p)));
+        res.writeHead(200, {
+          'Content-Type': 'image/jpeg',
+          'Content-Length': buf.length,
+          // 缩略图按内容缓存在服务端了，浏览器这边也让它存一会儿
+          'Cache-Control': 'private, max-age=600',
+        });
+        return res.end(buf);
+      } catch (e) {
+        return json(res, 404, { error: e.message });
+      }
     }
     if (url.pathname === '/api/upload' && req.method === 'POST') {
       return await handleUpload(req, res);

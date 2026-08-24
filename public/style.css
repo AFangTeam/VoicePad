@@ -143,24 +143,31 @@ button:disabled { opacity: 0.35; cursor: default; }
 .viewer-empty p { font-size: 14px; color: var(--text-2); margin-bottom: 4px; }
 .viewer-empty span { font-size: 12px; }
 
-/* 素材列表 */
+/* 素材胶片条 —— 横向滚动 + 特征图 */
 
 .clips {
   border-top: 1px solid var(--line-soft);
   background: var(--surface);
-  max-height: 34vh;
-  display: flex;
-  flex-direction: column;
+  flex: none;
 }
 
 .clips-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 9px 16px;
+  padding: 8px 16px 6px;
   font-size: 12px;
   color: var(--text-2);
-  border-bottom: 1px solid var(--line-soft);
+}
+
+.clips-tools { display: flex; align-items: center; gap: 14px; }
+
+.hint-keys {
+  font-size: 11px;
+  color: var(--text-3);
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  padding: 1px 7px;
 }
 
 .clips-head .all {
@@ -168,40 +175,138 @@ button:disabled { opacity: 0.35; cursor: default; }
   cursor: pointer; user-select: none;
 }
 
-.clips ul { list-style: none; overflow-y: auto; }
-
-.clips li {
+.strip {
   display: flex;
-  align-items: center;
   gap: 10px;
-  padding: 8px 16px;
-  border-bottom: 1px solid var(--line-soft);
-  cursor: pointer;
-  transition: background 0.12s var(--ease);
+  padding: 2px 16px 14px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
+  outline: none;
+  /* 触控板双指左右滑就是最自然的操作 */
+  overscroll-behavior-x: contain;
 }
 
-.clips li:hover { background: var(--surface-2); }
-.clips li.active { background: var(--accent-dim); }
-.clips li.active .name { color: var(--accent); }
+.strip::-webkit-scrollbar { height: 7px; }
 
-.clips li .name {
-  flex: 1;
-  min-width: 0;
+.cell {
+  flex: none;
+  width: 128px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.cell-thumb {
+  position: relative;
+  width: 128px;
+  height: 72px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0b0c0e;
+  border: 1px solid var(--line-soft);
+  transition: border-color 0.16s var(--ease), transform 0.16s var(--ease),
+              box-shadow 0.16s var(--ease);
+}
+
+.cell-thumb img {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 0.24s var(--ease);
+}
+
+.cell-thumb.ready img { opacity: 1; }
+
+/* 抽帧失败也要有个像样的占位，不能是一块空洞 */
+.cell-thumb.failed::after {
+  content: '';
+  position: absolute; inset: 0;
+  background:
+    repeating-linear-gradient(45deg, transparent 0 6px, rgba(255,255,255,0.035) 6px 12px);
+}
+
+.cell:hover .cell-thumb { transform: translateY(-2px); border-color: #3a4047; }
+
+.cell.active .cell-thumb {
+  border-color: var(--live);
+  box-shadow: 0 0 0 1px var(--live), 0 4px 14px rgba(0,0,0,0.5);
+}
+
+/* 勾选角标 */
+.cell-pick {
+  position: absolute;
+  top: 5px; left: 5px;
+  width: 17px; height: 17px;
+  padding: 0;
+  border-radius: 5px;
+  border: 1px solid rgba(255,255,255,0.5);
+  background: rgba(10, 11, 13, 0.6);
+  backdrop-filter: blur(6px);
+  cursor: pointer;
+  transition: background 0.14s var(--ease), border-color 0.14s var(--ease);
+}
+
+.cell-pick:hover { border-color: #fff; }
+
+.cell-pick.on {
+  background: var(--live);
+  border-color: var(--live);
+}
+
+.cell-pick.on::after {
+  content: '';
+  position: absolute;
+  left: 5px; top: 2px;
+  width: 4px; height: 8px;
+  border: solid #14161a;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+/* 未勾选的整体压暗 —— 一眼看出这批要导出哪些 */
+.cell:not(.picked) .cell-thumb img { opacity: 0.4; }
+.cell:not(.picked) .cell-name { color: var(--text-3); }
+
+.cell-dur {
+  position: absolute;
+  right: 4px; bottom: 4px;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+  background: rgba(10, 11, 13, 0.72);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.cell-badge {
+  position: absolute;
+  left: 5px; bottom: 4px;
+  font-size: 9px;
+  border-radius: 4px;
+  padding: 0 4px;
+  opacity: 0;
+}
+
+.cell-badge.tuned { opacity: 1; color: var(--live); background: rgba(10,11,13,0.75); }
+.cell-badge.ok    { opacity: 1; color: #6ec98a; background: rgba(10,11,13,0.8); }
+.cell-badge.err   { opacity: 1; color: #e0785f; background: rgba(10,11,13,0.8); }
+.cell-badge.busy  { opacity: 1; color: var(--text-2); background: rgba(10,11,13,0.8); }
+
+.cell-name {
+  display: block;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.clips li .meta {
-  font-size: 11px;
-  color: var(--text-3);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
+.cell.active .cell-name { color: var(--live); }
 
-.clips li .state { font-size: 11px; color: var(--text-3); white-space: nowrap; }
-.clips li .state.ok { color: #6ec98a; }
-.clips li .state.err { color: #e0785f; }
+/* 焦点分区提示：方向键现在归谁管，要看得见 */
+.stage.zone-clips .clips { box-shadow: inset 0 1px 0 var(--live); }
+.panel.zone-pad { box-shadow: inset 1px 0 0 var(--live); }
 
 input[type=checkbox] { accent-color: var(--accent); }
 
@@ -672,8 +777,6 @@ input[type=range]:active::-webkit-slider-thumb { cursor: grabbing; transform: sc
 ::-webkit-scrollbar-thumb:hover { background: #363b42; }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* 素材行的选中态给一条左侧活色描边，和苹果侧栏一个语气 */
-.clips li.active { box-shadow: inset 2px 0 0 var(--live); }
 
 /* ── 双声道监听 / 甜点值 ────────────────────────────────── */
 
@@ -754,12 +857,3 @@ input[type=range]:active::-webkit-slider-thumb { cursor: grabbing; transform: sc
 .preset-note.armed { color: var(--live); }
 
 /* 素材行：带自定义参数的打个标 */
-.clips li .tuned {
-  font-size: 10px;
-  color: var(--live);
-  border: 1px solid currentColor;
-  border-radius: 4px;
-  padding: 0 4px;
-  flex: none;
-  opacity: 0.85;
-}

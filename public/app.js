@@ -29,6 +29,22 @@ const state = {
 /** ⌘C 存下来的甜点值 */
 let clipboard = null;
 
+/**
+ * 方向键归谁管。
+ *
+ * 同一组方向键在两个地方都有意义：在 pad 上是微调音色，在素材区是切换素材。
+ * 按"最后点了哪儿"分派 —— 点了视频画面或胶片条就是 'clips'，点了 pad 就是 'pad'。
+ * 界面上给出明确的焦点描边，不让用户猜现在按方向键会发生什么。
+ */
+let focusZone = 'clips';
+
+function setFocusZone(zone) {
+  if (focusZone === zone) return;
+  focusZone = zone;
+  document.querySelector('.stage').classList.toggle('zone-clips', zone === 'clips');
+  document.querySelector('.panel').classList.toggle('zone-pad', zone === 'pad');
+}
+
 const $ = (id) => document.getElementById(id);
 const video = $('video');
 
@@ -497,7 +513,27 @@ function padUpdate(e) {
 
 let dragging = false;
 
+// 点视频画面：拿焦点 + 播放/暂停。这是对着一个播放器最本能的两个期待
+video.addEventListener('click', () => {
+  setFocusZone('clips');
+  ensureAudio();
+  video.paused ? video.play() : video.pause();
+});
+document.querySelector('.viewer').addEventListener('pointerdown', () => setFocusZone('clips'));
+$('clipList').addEventListener('pointerdown', () => setFocusZone('clips'));
+$('transport').addEventListener('pointerdown', () => setFocusZone('clips'));
+
+// 胶片条：把纵向滚轮转成横向，鼠标用户也能滑
+$('clipList').addEventListener('wheel', (e) => {
+  const strip = $('clipList');
+  if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;   // 触控板横滑，交给浏览器
+  if (strip.scrollWidth <= strip.clientWidth) return;
+  e.preventDefault();
+  strip.scrollLeft += e.deltaY;
+}, { passive: false });
+
 pad.addEventListener('pointerdown', (e) => {
+  setFocusZone('pad');
   ensureAudio();
   // 捕获失败不该中断手势本身 —— 拖动比"指针锁定"重要，
   // 而且捕获在某些注入/无障碍场景下会抛
@@ -528,6 +564,8 @@ $('reset').addEventListener('click', () => {
   render();
 });
 
+document.querySelector('.panel').addEventListener('pointerdown', () => setFocusZone('pad'));
+
 $('monitorBtn').addEventListener('click', () => {
   ensureAudio();
   state.stereoMonitor = !state.stereoMonitor;
@@ -543,6 +581,28 @@ $('monitorBtn').addEventListener('click', () => {
 });
 
 // ── 甜点值 复制 / 粘贴 ──────────────────────────────────────
+
+/**
+ * 把面板上的三个值抓成一个普通对象。
+ *
+ * 只存 tone / balance / master —— 这三个才是"这条素材要怎么调"。
+ * stereoMonitor 是监听开关，属于人当下想听什么，不属于素材，故意不进快照：
+ * 否则粘贴一次甜点值会顺手把别人的监听状态也改掉。
+ */
+function snapshotParams() {
+  return { tone: state.tone, balance: state.balance, master: state.master };
+}
+
+/** 快照写回面板。走 render() 而不是直接改 DOM，声音和画面一起跟上 */
+function loadParams(p) {
+  if (!p) return;
+  state.tone = Math.max(-1, Math.min(1, Number(p.tone) || 0));
+  state.balance = Math.max(-1, Math.min(1, Number(p.balance) || 0));
+  state.master = Math.max(0, Math.min(1.6, p.master == null ? 1 : Number(p.master)));
+  $('master').value = String(Math.round(state.master * 100));
+  ensureAudio();
+  render();
+}
 
 function copyParams() {
   clipboard = snapshotParams();
@@ -591,18 +651,49 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault(); pasteParams(); return;
   }
 
-  const step = e.shiftKey ? 0.01 : 0.05;
-  const map = {
-    ArrowUp: () => state.tone = Math.min(1, state.tone + step),
-    ArrowDown: () => state.tone = Math.max(-1, state.tone - step),
-    ArrowLeft: () => state.balance = Math.max(-1, state.balance - step),
-    ArrowRight: () => state.balance = Math.min(1, state.balance + step),
-  };
-  if (map[e.key]) { e.preventDefault(); ensureAudio(); map[e.key](); render(); }
+  // 首尾素材
+  if (e.key === 'Home') { e.preventDefault(); open(0); return; }
+  if (e.key === 'End') { e.preventDefault(); open(state.files.length - 1); return; }
+
+  // 方向键：素材区切素材，pad 区微调音色
+  if (e.key.startsWith('Arrow')) {
+    e.preventDefault();
+    if (focusZone === 'clips') {
+      if (e.key === 'ArrowLeft') step(-1);
+      if (e.key === 'ArrowRight') step(1);
+      // 素材区的上下留给播放头：跳 ±5 秒，比切素材更符合直觉
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        const d = e.key === 'ArrowUp' ? 5 : -5;
+        if (isFinite(video.duration)) {
+          video.currentTime = Math.max(0, Math.min(video.duration, video.currentTime + d));
+        }
+      }
+      return;
+    }
+    // pad 区：微调
+    const inc = e.shiftKey ? 0.01 : 0.05;
+    ensureAudio();
+    if (e.key === 'ArrowUp') state.tone = Math.min(1, state.tone + inc);
+    if (e.key === 'ArrowDown') state.tone = Math.max(-1, state.tone - inc);
+    if (e.key === 'ArrowLeft') state.balance = Math.max(-1, state.balance - inc);
+    if (e.key === 'ArrowRight') state.balance = Math.min(1, state.balance + inc);
+    render();
+    return;
+  }
+
   if (e.code === 'Space' && state.current >= 0) {
     e.preventDefault();
     ensureAudio();
     video.paused ? video.play() : video.pause();
+    return;
+  }
+
+  // M 切监听、R 归零 —— 常用到值得给个单键
+  if (e.key.toLowerCase() === 'm' && !e.metaKey && !e.ctrlKey) {
+    e.preventDefault(); $('monitorBtn').click(); return;
+  }
+  if (e.key.toLowerCase() === 'r' && !e.metaKey && !e.ctrlKey) {
+    e.preventDefault(); $('reset').click(); return;
   }
 });
 
@@ -619,58 +710,165 @@ function fmtSize(bytes) {
   return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
 }
 
+/**
+ * 胶片条。
+ *
+ * 原来是纵向细条列表，几十条素材挤在一条狭长区域里上下滚 —— 选片时
+ * 既看不见画面也滑不顺手。改成横向铺开 + 特征图（参考 Cubic 调色面板
+ * 下方那条），触控板双指左右滑就是最自然的操作。
+ */
 function renderClips() {
-  const ul = $('clipList');
-  ul.innerHTML = '';
-  state.files.forEach((f, i) => {
-    const li = document.createElement('li');
-    li.className = i === state.current ? 'active' : '';
+  const strip = $('clipList');
+  strip.innerHTML = '';
 
-    const cb = document.createElement('input');
-    cb.type = 'checkbox';
-    cb.checked = state.selected.has(i);
-    cb.addEventListener('click', (e) => {
+  state.files.forEach((f, i) => {
+    const cell = document.createElement('div');
+    cell.className = 'cell' + (i === state.current ? ' active' : '');
+    cell.dataset.index = String(i);
+
+    // 缩略图
+    const thumb = document.createElement('div');
+    thumb.className = 'cell-thumb';
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.alt = '';
+    img.addEventListener('load', () => thumb.classList.add('ready'));
+    img.addEventListener('error', () => thumb.classList.add('failed'));
+    thumb.appendChild(img);
+    queueThumb(f, img);
+
+    // 勾选：单独一个角标，点它不会连带切换素材
+    const pick = document.createElement('button');
+    pick.className = 'cell-pick' + (state.selected.has(i) ? ' on' : '');
+    pick.type = 'button';
+    pick.title = '选中用于批量导出';
+    pick.addEventListener('click', (e) => {
       e.stopPropagation();
-      cb.checked ? state.selected.add(i) : state.selected.delete(i);
+      if (state.selected.has(i)) state.selected.delete(i);
+      else state.selected.add(i);
+      pick.classList.toggle('on');
+      cell.classList.toggle('picked', state.selected.has(i));
+      syncSelectAll();
       syncExportButton();
     });
+    thumb.appendChild(pick);
+
+    // 时长压在缩略图右下
+    const dur = document.createElement('span');
+    dur.className = 'cell-dur';
+    dur.textContent = fmtDuration(f.duration);
+    thumb.appendChild(dur);
+
+    // 已调 / 导出状态
+    const badge = document.createElement('span');
+    badge.className = 'cell-badge';
+    badge.dataset.index = String(i);
+    if (f.params) { badge.classList.add('tuned'); badge.textContent = '已调'; }
+    thumb.appendChild(badge);
 
     const name = document.createElement('span');
-    name.className = 'name';
+    name.className = 'cell-name';
     name.textContent = f.name;
+    name.title = f.name;
 
-    const meta = document.createElement('span');
-    meta.className = 'meta';
-    meta.textContent = `${fmtDuration(f.duration)} · ${fmtSize(f.size)}`;
-
-    // 有自己参数的素材打个标 —— 批量粘贴后一眼看出哪些已经应用了
-    const tuned = document.createElement('span');
-    if (f.params) { tuned.className = 'tuned'; tuned.textContent = '已调'; }
-
-    const st = document.createElement('span');
-    st.className = 'state';
-    st.dataset.index = String(i);
-
-    li.append(cb, name, tuned, meta, st);
-    li.addEventListener('click', () => open(i));
-    ul.appendChild(li);
+    cell.append(thumb, name);
+    if (state.selected.has(i)) cell.classList.add('picked');
+    cell.addEventListener('click', () => { focusZone = 'clips'; open(i); });
+    strip.appendChild(cell);
   });
+
   $('clipsCount').textContent = `${state.files.length} 条素材`;
+  syncSelectAll();
   syncExportButton();
+  scrollCurrentIntoView();
 }
 
-/** 当前面板参数的快照 */
-function snapshotParams() {
-  return { tone: state.tone, balance: state.balance, master: state.master };
+/** 全选框跟随实际勾选状态（含半选） */
+function syncSelectAll() {
+  const box = $('selectAll');
+  const n = state.selected.size, total = state.files.length;
+  box.checked = n === total && total > 0;
+  box.indeterminate = n > 0 && n < total;
 }
 
-/** 把参数装进面板 */
-function loadParams(p) {
-  state.tone = p.tone;
-  state.balance = p.balance;
-  state.master = p.master;
-  $('master').value = String(Math.round(p.master * 100));
-  render();
+/** 让当前素材滚进视野 —— 方向键连按时必须跟着走 */
+function scrollCurrentIntoView() {
+  const cell = $('clipList').querySelector(`.cell[data-index="${state.current}"]`);
+  cell?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
+}
+
+// ── 缩略图取用 ──────────────────────────────────────────────
+//
+// 限流 3 条并发：文件夹模式每张都要 ffmpeg 抽帧，一次放几十个请求
+// 会让服务端排队、页面看起来卡住；拖放模式更要限，那是在浏览器里解码。
+
+const thumbQueue = [];
+let thumbActive = 0;
+
+function queueThumb(file, img) {
+  thumbQueue.push({ file, img });
+  pumpThumbs();
+}
+
+function pumpThumbs() {
+  while (thumbActive < 3 && thumbQueue.length) {
+    const job = thumbQueue.shift();
+    thumbActive++;
+    loadThumb(job.file, job.img).finally(() => { thumbActive--; pumpThumbs(); });
+  }
+}
+
+async function loadThumb(file, img) {
+  // 服务端有路径就交给 ffmpeg 抽 —— 比浏览器解码快得多，也不抢硬解码器
+  if (file.path) {
+    img.src = `/api/thumb?path=${encodeURIComponent(file.path)}`;
+    return;
+  }
+  // 拖放进来的只有 File 对象，只能在浏览器里抓一帧
+  if (file.thumbURL) { img.src = file.thumbURL; return; }
+  try {
+    file.thumbURL = await grabFrame(file.file);
+    img.src = file.thumbURL;
+  } catch { img.dispatchEvent(new Event('error')); }
+}
+
+/** 用一个离屏 <video> 抓 10% 处的一帧，画进 canvas 转 blob URL */
+function grabFrame(fileObj) {
+  return new Promise((ok, fail) => {
+    const v = document.createElement('video');
+    v.muted = true;
+    v.preload = 'metadata';
+    const url = URL.createObjectURL(fileObj);
+    let done = false;
+    const cleanup = () => { URL.revokeObjectURL(url); v.src = ''; };
+
+    const bail = () => { if (!done) { done = true; cleanup(); fail(new Error('抓帧失败')); } };
+    v.onerror = bail;
+    // 兜底：某些容器 seek 不回调，别让队列卡死
+    const timer = setTimeout(bail, 6000);
+
+    v.onloadedmetadata = () => {
+      // 开头常是黑场，取 10% 处
+      v.currentTime = Math.min(1, (v.duration || 2) * 0.1);
+    };
+    v.onseeked = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        const w = 256;
+        const h = Math.max(2, Math.round(w * (v.videoHeight / v.videoWidth)) || 144);
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        cv.getContext('2d').drawImage(v, 0, 0, w, h);
+        cv.toBlob((b) => {
+          cleanup();
+          b ? ok(URL.createObjectURL(b)) : fail(new Error('编码失败'));
+        }, 'image/jpeg', 0.8);
+      } catch (e) { cleanup(); fail(e); }
+    };
+    v.src = url;
+  });
 }
 
 function open(i) {
@@ -703,6 +901,16 @@ function open(i) {
   document.querySelector('.viewer').classList.add('has-video');
   $('transport').hidden = false;
   renderClips();
+  scrollCurrentIntoView();
+}
+
+const badgeEl = (i) => document.querySelector(`.cell-badge[data-index="${i}"]`);
+
+/** 上/下一条素材。到头就停，不绕回 —— 连按方向键时绕回很容易看丢位置 */
+function step(delta) {
+  if (!state.files.length) return;
+  const next = Math.max(0, Math.min(state.files.length - 1, state.current + delta));
+  if (next !== state.current) open(next);
 }
 
 function syncExportButton() {
@@ -739,6 +947,9 @@ $('selectAll').addEventListener('change', (e) => {
   renderClips();
 });
 
+// 胶片条本身可聚焦，方向键就能用
+$('clipList').addEventListener('focus', () => setFocusZone('clips'));
+
 // ── 导出 ────────────────────────────────────────────────────
 
 $('exportBtn').addEventListener('click', async () => {
@@ -762,7 +973,12 @@ $('exportBtn').addEventListener('click', async () => {
 
   $('exportBtn').disabled = true;
   $('progress').hidden = false;
-  document.querySelectorAll('.state').forEach((el) => { el.textContent = ''; el.className = 'state'; });
+  // 清掉上一轮的导出状态；「已调」标记要保留
+  document.querySelectorAll('.cell-badge').forEach((el) => {
+    const i = Number(el.dataset.index);
+    el.className = 'cell-badge' + (state.files[i]?.params ? ' tuned' : '');
+    el.textContent = state.files[i]?.params ? '已调' : '';
+  });
 
   // 拖进来的素材浏览器不给绝对路径，服务端读不到，只能先传上去。
   // 文件夹模式的素材本来就在服务端，跳过这一步（几个 GB 不用白搬）。
@@ -779,8 +995,8 @@ $('exportBtn').addEventListener('click', async () => {
       $('progressText').textContent = `上传 ${f.name}（${k + 1}/${chosen.length}）`;
       $('progressText').classList.add('uploading');
       $('progressFill').style.width = `${(k / chosen.length) * 100}%`;
-      const el = document.querySelector(`.state[data-index="${i}"]`);
-      if (el) el.textContent = '上传中';
+      const el = badgeEl(i);
+      if (el) { el.className = 'cell-badge busy'; el.textContent = '上传中'; }
 
       const res = await fetch('/api/upload', {
         method: 'POST',
@@ -797,7 +1013,7 @@ $('exportBtn').addEventListener('click', async () => {
         index: i, path: info.path, duration: info.duration ?? f.duration,
         name: f.name, uploaded: true, filter: filterFor(i),
       });
-      if (el) el.textContent = '待导出';
+      if (el) { el.className = 'cell-badge busy'; el.textContent = '待传'; }
     }
   } catch (err) {
     toast(err.message || '上传失败');
@@ -822,7 +1038,7 @@ $('exportBtn').addEventListener('click', async () => {
   const decoder = new TextDecoder();
   let buf = '';
 
-  const stateEl = (i) => document.querySelector(`.state[data-index="${i}"]`);
+  const stateEl = badgeEl;
 
   while (true) {
     const { value, done } = await reader.read();
@@ -838,7 +1054,7 @@ $('exportBtn').addEventListener('click', async () => {
       const real = picked[msg.index]?.index;
 
       if (msg.type === 'start') {
-        const el = stateEl(real); if (el) el.textContent = '导出中';
+        const el = stateEl(real); if (el) { el.className = 'cell-badge busy'; el.textContent = '导出中'; }
         $('progressText').textContent = `${msg.name}（${doneCount + 1}/${picked.length}）`;
       } else if (msg.type === 'progress') {
         const pct = msg.duration ? Math.min(1, msg.seconds / msg.duration) : 0;
@@ -847,11 +1063,11 @@ $('exportBtn').addEventListener('click', async () => {
       } else if (msg.type === 'done') {
         doneCount++;
         lastOutput = msg.output;
-        const el = stateEl(real); if (el) { el.textContent = '已导出'; el.className = 'state ok'; }
+        const el = stateEl(real); if (el) { el.className = 'cell-badge ok'; el.textContent = '已导出'; }
         $('progressFill').style.width = `${(doneCount / picked.length) * 100}%`;
       } else if (msg.type === 'error') {
         doneCount++;
-        const el = stateEl(real); if (el) { el.textContent = '失败'; el.className = 'state err'; }
+        const el = stateEl(real); if (el) { el.className = 'cell-badge err'; el.textContent = '失败'; }
         toast(msg.message);
       } else if (msg.type === 'all-done') {
         $('progressText').textContent = '完成';
@@ -1048,6 +1264,8 @@ function toast(text) {
 }
 
 window.addEventListener('resize', render);
+
+document.querySelector('.stage').classList.add('zone-clips');
 
 const saved = localStorage.getItem('voicepad.dir');
 if (saved) $('dir').value = saved;

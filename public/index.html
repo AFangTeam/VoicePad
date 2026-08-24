@@ -68,15 +68,19 @@
       <span class="time" id="timeTotal">0:00</span>
     </section>
 
+    <!-- 胶片条：横向滚动 + 特征图。参考 Cubic 调色面板下方那条 -->
     <section class="clips" id="clips" hidden>
       <div class="clips-head">
         <span id="clipsCount">0 条素材</span>
-        <label class="all">
-          <input type="checkbox" id="selectAll" checked>
-          全选
-        </label>
+        <div class="clips-tools">
+          <span class="hint-keys">← → 切换</span>
+          <label class="all">
+            <input type="checkbox" id="selectAll" checked>
+            全选
+          </label>
+        </div>
       </div>
-      <ul id="clipList"></ul>
+      <div class="strip" id="clipList" tabindex="0"></div>
     </section>
   </main>
 
