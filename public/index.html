@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoicePad</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="app">
+
+  <!-- 左：素材与播放 -->
+  <main class="stage">
+    <header class="stage-head">
+      <div class="brand">
+        <span class="dot"></span>
+        VoicePad
+      </div>
+      <form class="picker" id="picker">
+        <input id="dir" type="text" spellcheck="false"
+               placeholder="粘贴素材文件夹路径，回车打开" autocomplete="off">
+        <button type="submit">打开</button>
+      </form>
+    </header>
+
+    <section class="viewer">
+      <video id="video" playsinline></video>
+      <div class="viewer-empty" id="viewerEmpty">
+        <p>打开一个文件夹开始</p>
+        <span>批量载入其中的视频，右侧调音、一键导出</span>
+      </div>
+    </section>
+
+    <section class="clips" id="clips" hidden>
+      <div class="clips-head">
+        <span id="clipsCount">0 条素材</span>
+        <label class="all">
+          <input type="checkbox" id="selectAll" checked>
+          全选
+        </label>
+      </div>
+      <ul id="clipList"></ul>
+    </section>
+  </main>
+
+  <!-- 右：调音面板 -->
+  <aside class="panel">
+
+    <div class="master">
+      <div class="master-row">
+        <span class="label">总音量</span>
+        <span class="value" id="masterValue">100%</span>
+      </div>
+      <input id="master" type="range" min="0" max="160" value="100" step="1">
+    </div>
+
+    <div class="pad-wrap">
+      <div class="pad" id="pad">
+        <div class="pad-grid"></div>
+        <div class="pad-glow" id="padGlow"></div>
+        <div class="pad-axis pad-axis-h"></div>
+        <div class="pad-axis pad-axis-v"></div>
+        <span class="pad-hint pad-hint-t">通透 · 明亮</span>
+        <span class="pad-hint pad-hint-b">低沉 · 磁性</span>
+        <span class="pad-hint pad-hint-l">左</span>
+        <span class="pad-hint pad-hint-r">右</span>
+        <div class="puck" id="puck"></div>
+      </div>
+      <button class="reset" id="reset">归零</button>
+    </div>
+
+    <div class="readout">
+      <div><span id="toneLabel">中性</span><em id="toneValue">0</em></div>
+      <div><span id="balLabel">居中</span><em id="balValue">0</em></div>
+    </div>
+
+    <div class="curve-wrap">
+      <canvas id="curve" width="600" height="180"></canvas>
+    </div>
+
+    <div class="export">
+      <button id="exportBtn" disabled>导出选中素材</button>
+      <p class="note">画面直通不重编码，只替换音轨</p>
+      <div class="progress" id="progress" hidden>
+        <div class="progress-bar"><i id="progressFill"></i></div>
+        <span id="progressText"></span>
+      </div>
+    </div>
+
+  </aside>
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>
