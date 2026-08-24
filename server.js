@@ -277,7 +277,11 @@ function serveStatic(res, urlPath) {
   if (!existsSync(file) || !statSync(file).isFile()) {
     res.writeHead(404); return res.end('Not found');
   }
-  res.writeHead(200, { 'Content-Type': MIME[extname(file)] || 'application/octet-stream' });
+  res.writeHead(200, {
+    'Content-Type': MIME[extname(file)] || 'application/octet-stream',
+    // 本地开发工具，禁缓存 —— 改完样式刷新看不到新效果比慢一点更糟
+    'Cache-Control': 'no-store',
+  });
   createReadStream(file).pipe(res);
 }
 

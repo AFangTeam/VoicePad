@@ -607,3 +607,108 @@ input[type=range]:active::-webkit-slider-thumb { background: var(--accent); curs
 
 /* 上传进度用同一套进度条样式 */
 .progress span.uploading { color: var(--accent); }
+
+/* ── 审美改造 v2 ────────────────────────────────────────
+   "活色"：--live 随音色变温（明亮→冷白 / 磁性→深暖），
+   只作用于"当前值"—— 底色保持中性，不干扰听感判断 */
+
+:root { --live: #f0a44a; }
+
+/* 电平表：夹住面板的两条细柱，真实音频驱动 */
+.pad-row {
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  width: 100%;
+}
+
+.pad-row .pad { flex: 1; min-width: 0; }
+
+.meter {
+  width: 4px;
+  margin: 10% 0;
+  border-radius: 2px;
+  background: var(--line-soft);
+  position: relative;
+  overflow: hidden;
+  flex: none;
+}
+
+.meter i {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 0%;
+  border-radius: 2px;
+  background: linear-gradient(to top, var(--live), color-mix(in srgb, var(--live) 55%, #fff));
+}
+
+/* 面板：上下方向的极淡冷暖暗示 —— 不用读字也知道往哪边是什么 */
+.pad::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: linear-gradient(to bottom,
+    rgba(183, 216, 255, 0.055),
+    transparent 40%, transparent 60%,
+    rgba(240, 164, 74, 0.075));
+  pointer-events: none;
+}
+
+/* 辉光与拖动高亮改用活色 */
+.pad-glow {
+  background: radial-gradient(circle,
+    color-mix(in srgb, var(--live) 17%, transparent) 0%, transparent 70%);
+}
+
+.puck {
+  background: radial-gradient(circle at 50% 40%, #ffffff, #d7dbe1 72%);
+}
+
+.puck::after {
+  content: '';
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 4px; height: 4px;
+  margin: -2px 0 0 -2px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.pad.dragging .puck {
+  background: var(--live);
+  box-shadow: 0 2px 14px rgba(0,0,0,0.7), 0 0 26px var(--live);
+}
+
+.pad.dragging .puck::after { background: rgba(0, 0, 0, 0.35); }
+
+/* 归零回弹（只在 settle 期间开 transition，拖动时不拖后腿） */
+.pad.settle .puck,
+.pad.settle .pad-glow {
+  transition:
+    left 0.5s cubic-bezier(0.34, 1.56, 0.64, 1),
+    top 0.5s cubic-bezier(0.34, 1.56, 0.64, 1),
+    opacity 0.3s var(--ease);
+}
+
+/* 读数：数值用活色 */
+.readout em { color: var(--live); }
+
+/* 导出按钮：一点立体感，仍然克制 */
+#exportBtn {
+  background: linear-gradient(180deg, #f5b568, #eb9c3d);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.3), 0 2px 8px rgba(240,164,74,0.18);
+}
+
+#exportBtn:hover:not(:disabled) {
+  background: linear-gradient(180deg, #f8bf7a, #f0a44a);
+}
+
+/* 滚动条收细 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: #2b2f35; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #363b42; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* 素材行的选中态给一条左侧活色描边，和苹果侧栏一个语气 */
+.clips li.active { box-shadow: inset 2px 0 0 var(--live); }

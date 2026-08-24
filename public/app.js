@@ -53,6 +53,24 @@ function buildAudioGraph() {
 
   const src = ctx.createMediaElementSource(video);
 
+  // ⚠️ 声道纠正的关键。
+  //
+  // MediaElementSource 的输出声道数**跟着媒体走**：单声道视频就是 1 声道。
+  // 而 ChannelSplitter 是 discrete 解释 —— 单声道进去，右声道输出是静音。
+  // 后果：相机里常见的单声道素材，预览只有左耳有声；往右拽平衡时
+  // 近侧是"抬高一条静音轨"，整个声音近乎消失。
+  //
+  // 导出那条路没这个问题（ffmpeg 侧 aformat 先升立体声），
+  // 也就是说这是一个"预览≠导出"—— 本 app 最不能容忍的一类 bug。
+  //
+  // 修法：入口处放一个 speakers 解释的节点，单声道自动复制到双声道，
+  // 立体声素材原样通过。和 ffmpeg 的 mono→stereo 默认升混（两路等增益）一致。
+  const upmix = ctx.createGain();
+  upmix.channelCount = 2;
+  upmix.channelCountMode = 'explicit';
+  upmix.channelInterpretation = 'speakers';
+  src.connect(upmix);
+
   // EQ 链。节点数量固定 —— 按最大编制建好，用不到的把增益设 0 即可。
   // 这样拖动时永远不用增删节点，也就永远不会有重连造成的爆音。
   const eq = SLOTS.map(() => {
@@ -74,7 +92,7 @@ function buildAudioGraph() {
 
   const master = ctx.createGain();
 
-  let chain = src;
+  let chain = upmix;
   for (const f of eq) { chain.connect(f); chain = f; }
   chain.connect(makeup);
   makeup.connect(splitter);
@@ -85,8 +103,50 @@ function buildAudioGraph() {
   merger.connect(master);
   master.connect(ctx.destination);
 
-  nodes = { eq, makeup, gainL, gainR, master };
+  // 左右声道电平表。装它有两个理由：真实音频驱动的动态是最诚实的
+  // "界面活着"的信号；而且声道对不对，看一眼两条表就知道，不用戴耳机猜。
+  const meterSplit = ctx.createChannelSplitter(2);
+  const anL = ctx.createAnalyser();
+  const anR = ctx.createAnalyser();
+  anL.fftSize = 512;
+  anR.fftSize = 512;
+  master.connect(meterSplit);
+  meterSplit.connect(anL, 0);
+  meterSplit.connect(anR, 1);
+
+  nodes = { eq, makeup, gainL, gainR, master, anL, anR };
   applyAudio(true);
+  startMeters();
+}
+
+// ── 电平表动画 ──────────────────────────────────────────────
+
+const meterBuf = new Float32Array(512);
+let meterShown = { l: 0, r: 0 };
+
+function channelLevel(analyser) {
+  analyser.getFloatTimeDomainData(meterBuf);
+  let sum = 0;
+  for (let i = 0; i < meterBuf.length; i++) sum += meterBuf[i] * meterBuf[i];
+  const db = 20 * Math.log10(Math.sqrt(sum / meterBuf.length) + 1e-9);
+  // -48dB..0dB 映射到 0..1
+  return Math.max(0, Math.min(1, (db + 48) / 48));
+}
+
+function startMeters() {
+  // setInterval 而不是 requestAnimationFrame：RAF 在后台标签页会被完全冻结，
+  // 切回来表针会"跳"一下；而这个 tick 只是一次 512 点 RMS + 两次样式写入，
+  // 33ms 一次的开销可以忽略。
+  setInterval(() => {
+    if (!nodes) return;
+    const l = channelLevel(nodes.anL);
+    const r = channelLevel(nodes.anR);
+    // 快攻慢放 —— 表针弹起要快，回落要有阻尼，和硬件 VU 一个手感
+    meterShown.l = l > meterShown.l ? l : meterShown.l * 0.86;
+    meterShown.r = r > meterShown.r ? r : meterShown.r * 0.86;
+    $('meterL').style.height = `${(meterShown.l * 100).toFixed(1)}%`;
+    $('meterR').style.height = `${(meterShown.r * 100).toFixed(1)}%`;
+  }, 33);
 }
 
 
@@ -193,9 +253,11 @@ function drawCurve() {
     const x = (i / (resp.length - 1)) * W;
     i ? cctx.lineTo(x, y(db)) : cctx.moveTo(x, y(db));
   });
+  const liveFill = (getComputedStyle(document.documentElement)
+    .getPropertyValue('--live').trim() || '#f0a44a');
   const grad = cctx.createLinearGradient(0, 0, 0, H);
-  grad.addColorStop(0, 'rgba(240,164,74,0.22)');
-  grad.addColorStop(1, 'rgba(240,164,74,0)');
+  grad.addColorStop(0, `${liveFill}38`);
+  grad.addColorStop(1, `${liveFill}00`);
   cctx.save();
   cctx.lineTo(W, y(0)); cctx.lineTo(0, y(0)); cctx.closePath();
   cctx.fillStyle = grad; cctx.fill();
@@ -206,14 +268,36 @@ function drawCurve() {
     const x = (i / (resp.length - 1)) * W;
     i ? cctx.lineTo(x, y(db)) : cctx.moveTo(x, y(db));
   });
-  cctx.strokeStyle = '#f0a44a';
+  const live = getComputedStyle(document.documentElement)
+    .getPropertyValue('--live').trim() || '#f0a44a';
+  cctx.strokeStyle = live;
   cctx.lineWidth = 1.6 * dpr;
   cctx.lineJoin = 'round';
   cctx.stroke();
 }
 
+/**
+ * 音色 → 界面"活色"。
+ *
+ * 苹果调色台的手感有一半来自"界面在跟着你的操作呼吸"。这里让强调色随
+ * 音色偏移轻微变温：往明亮方向偏冷白，往磁性方向偏深暖。幅度刻意压得
+ * 很小 —— 界面底色保持中性（带色偏会干扰听感判断），只有"当前值"在变。
+ */
+function blendHex(a, b, t) {
+  const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+  const ch = (sh) => Math.round(((pa >> sh) & 255) + (((pb >> sh) & 255) - ((pa >> sh) & 255)) * t);
+  return `#${((ch(16) << 16) | (ch(8) << 8) | ch(0)).toString(16).padStart(6, '0')}`;
+}
+
+function liveColor() {
+  const t = state.tone;
+  if (t >= 0) return blendHex('#f0a44a', '#b7d8ff', t * 0.8);   // 明亮 → 冷白
+  return blendHex('#f0a44a', '#ff7a45', -t * 0.55);              // 磁性 → 深暖
+}
+
 function render() {
   const pad = $('pad');
+  document.documentElement.style.setProperty('--live', liveColor());
   const r = pad.clientWidth / 2;
   // puck 限制在半径内 —— 圆形面板，超出去看着就是坏的
   const px = r + state.balance * r * 0.84;
@@ -283,6 +367,9 @@ pad.addEventListener('pointercancel', endDrag);
 window.addEventListener('pointerup', endDrag);
 
 $('reset').addEventListener('click', () => {
+  // 回弹动画只在归零时开 —— 拖动期间开着 transition 会让 puck 拖后腿
+  pad.classList.add('settle');
+  setTimeout(() => pad.classList.remove('settle'), 550);
   state.tone = 0; state.balance = 0;
   render();
 });
