@@ -427,8 +427,20 @@ function extractDual(input, startSec, durSec) {
     if (startSec > 0) args.push('-ss', String(startSec));
     args.push('-t', String(durSec), '-i', input, '-vn', '-sn', '-dn');
     for (const [rate, target] of [[8000, 'pipe:1'], [48000, 'pipe:3']]) {
-      args.push('-map', '0:a:0', '-ac', '2', '-ar', String(rate),
-                '-c:a', 'pcm_f32le', '-f', 'f32le', target);
+      args.push('-map', '0:a:0', '-ac', '2', '-ar', String(rate));
+      // ⚠️ 48k 这一路是给精定位用的，必须带通。
+      //
+      // 粗定位的 GCC-PHAT 只在 150–3400Hz 加权，精定位却是直接算归一化互相关。
+      // 拿宽带信号算，两支音色差很远的麦（一支机头麦、一支小蜜蜂 —— 这个工具的
+      // 常态）在低频隆隆声和高频嘶声上根本不相关，那些能量会灌进相关系数的分母
+      // 把结果冲垮。
+      //
+      // 这一句在「一次开文件拿两种采样率」那次提速里被弄丢了（d75fded），
+      // 之后 Cubic 和 AU 插件都是从丢了之后的版本移植的，三处一起中招。
+      // 实测素材 C4899：宽带相关只有 +0.066，峰还选错到 −22.0ms、符号也反了；
+      // 带通回来之后 +0.237，峰回到 −23.25ms。
+      if (rate === 48000) args.push('-af', 'highpass=f=200,lowpass=f=6000');
+      args.push('-c:a', 'pcm_f32le', '-f', 'f32le', target);
     }
 
     const ff = spawn('ffmpeg', args, { stdio: ['ignore', 'pipe', 'pipe', 'pipe'] });
@@ -466,6 +478,15 @@ function energy(a, from, to) {
   let e = 0;
   for (let i = from; i < to; i++) e += a[i] * a[i];
   return e;
+}
+
+/** 一条声道的 RMS，用来区分"静音"和"双单声道" */
+function channelRMS(a, n) {
+  let sum = 0;
+  const step = Math.max(1, Math.floor(n / 8192));
+  let cnt = 0;
+  for (let i = 0; i < n; i += step) { sum += a[i] * a[i]; cnt++; }
+  return cnt ? Math.sqrt(sum / cnt) : 0;
 }
 
 /** 两条声道逐样本相同 = 单声道素材被 -ac 2 复制成了两条，没有对轨的余地 */
@@ -519,12 +540,15 @@ function coarseLag(L, R, rate, maxLagSec) {
  * 精定位：在已知的小范围里做直接归一化互相关，抛物线插值到采样以下。
  * lag 为正 = 右声道比左声道**早**到，和 align 的符号一致。
  */
-function fineLag(L, R, rate, centerLag, span, maxSec = 10, sign = 1) {
+function fineLag(L, R, rate, centerLag, span, maxSec = 10, sign = 1, focus = null) {
   // 相关只用中间一段。互相关的代价是 滞后数 × 样本数，20 秒 @48k 就是
   // 3000 万次乘加（~60ms）；6 秒足够把峰值定到采样以下，而且贵得多的
   // 是"多算 14 秒"而不是"少一点精度"—— 实测误差仍是 0.00 采样
   const cap = Math.min(L.length, Math.round(maxSec * rate));
-  const off = Math.floor((L.length - cap) / 2);
+  // focus：到证据最强的那一窗去做精定位。取正中间是碰运气 —— 实测 C4899 的
+  // 窗口正中间恰好是最差的一段，在那儿只拿到 0.047 的相关、值也偏了 0.3ms
+  let off = Math.floor((L.length - cap) / 2);
+  if (focus != null) off = Math.max(0, Math.min(L.length - cap, focus - Math.floor((cap - 4 * rate) / 2)));
   if (off > 0) { L = L.subarray(off, off + cap); R = R.subarray(off, off + cap); }
 
   const n = L.length;
@@ -571,14 +595,19 @@ const AGREE_TOL_8K = 4;      // 段间一致的容差（4 个 8k 采样 = 0.5ms�
 async function analyzeAlign(input, opts = {}) {
   const duration = Number(opts.duration) || 0;
   // 起点躲开开头的板子/环境音；素材短就从头来
-  const win = Math.min(24, duration > 0 ? Math.max(4, duration) : 24);
+  const win = Math.min(32, duration > 0 ? Math.max(4, duration) : 32);
   const start = duration > win + 2 ? Math.min(duration * 0.1, duration - win) : 0;
 
   let { s8, s48 } = await extractDual(input, start, win);
   if (s8.n < 8000) ({ s8, s48 } = await extractDual(input, 0, Math.max(4, duration || 24)));
   if (s8.n < 4000) throw new Error('音频太短，不足以分析');
+  // 静音和"双单声道"必须分开判：全零的两条声道当然"相等"，
+  // 只做逐样本比较会把一段静音报成「单声道素材」
+  if (channelRMS(s8.L, s8.n) < 3e-4 && channelRMS(s8.R, s8.n) < 3e-4) {
+    throw new Error('这一段几乎是静音，先找一段有人说话的地方');
+  }
   if (identicalChannels(s8.L, s8.R, s8.n)) {
-    throw new Error('两条声道完全相同（单声道素材），不需要对轨');
+    throw new Error('两条声道完全相同（双单声道），不需要对轨');
   }
 
   // ── verify：拿着假设去核对，不做 FFT ──
@@ -601,49 +630,79 @@ async function analyzeAlign(input, opts = {}) {
     });
   }
 
-  // ── fast：切段复核 ──
-  const seg = Math.floor(s8.n / SEGMENTS);
-  const lags = [], signs = [];
-  let sharp = 0;
-  if (seg > 8000) {
-    const es = [];
-    for (let k = 0; k < SEGMENTS; k++) {
-      es.push(Math.min(energy(s8.L, k * seg, (k + 1) * seg),
-                       energy(s8.R, k * seg, (k + 1) * seg)));
-    }
-    const loudest = Math.max(...es);
-    for (let k = 0; k < SEGMENTS; k++) {
-      if (es[k] < loudest * 0.02) continue;        // 这一段基本是静音，跳过
-      const c = coarseLag(s8.L.subarray(k * seg, (k + 1) * seg),
-                          s8.R.subarray(k * seg, (k + 1) * seg), 8000, 0.5);
-      lags.push(c.lag);
-      signs.push(c.sign);
-      sharp = Math.max(sharp, c.sharpness);
-    }
+  // ── fast：切段加权复核 ──
+  const v = segmentVotes(s8);
+  const sharp = v.reduce((a, x) => Math.max(a, x.sharpness), 0);
+  const agreed = consensus(v, AGREE_TOL_8K);
+  if (process.env.VP_DEBUG) {
+    console.error('votes:', v.map(x => `${x.lag}(${x.sign > 0 ? '+' : '-'},${x.sharpness.toFixed(0)})`).join(' '),
+                  '→', agreed ? `lag ${agreed.lag} sign ${agreed.sign} count ${agreed.count}` : 'null');
   }
-
-  const agreed = consensus(lags, AGREE_TOL_8K);
   if (agreed) {
-    const sign = signs.reduce((a, b) => a + b, 0) >= 0 ? 1 : -1;
-    const fine = fineLag(s48.L, s48.R, 48000, agreed.value * 6, 16, 10, sign);
-    return finish(fine, { mode: 'fast', agreed: true, segments: agreed.count, sharpness: sharp, sign });
+    const fine = fineLag(s48.L, s48.R, 48000, agreed.lag * 6, 16, 10, agreed.sign, agreed.focus * 6);
+    return finish(fine, { mode: 'fast', agreed: true, segments: agreed.count,
+                          sharpness: sharp, sign: agreed.sign });
   }
 
   return await wideAnalyze(input, duration);
 }
 
-/** 找出彼此在容差内的最大一组，返回其中位数 */
-function consensus(lags, tol) {
-  if (lags.length < 2) return null;
+/**
+ * 找出彼此在容差内的一组，**按峰背比加权**选出最强的那组。
+ *
+ * ⚠️ 不能一段一票等权。峰背比说的是"这个滞后位置比背景突出多少"，也就是这一票
+ * 有多可信：实测素材 C4899 里，找对答案的三段峰背比是 37/51/38，乱指的几段是
+ * 13/21/23 —— 等权投票时后者能把前者压下去，于是达不成共识、掉进全片粗扫，
+ * 最后拿回一个负号的假峰。
+ */
+function consensus(votes, tol) {
+  if (votes.length < 2) return null;
   let best = null;
-  for (const anchor of lags) {
-    const group = lags.filter((l) => Math.abs(l - anchor) <= tol);
-    if (group.length >= 2 && (!best || group.length > best.count)) {
-      group.sort((a, b) => a - b);
-      best = { value: group[Math.floor(group.length / 2)], count: group.length };
+  for (const anchor of votes) {
+    const group = votes.filter((v) => Math.abs(v.lag - anchor.lag) <= tol);
+    if (group.length < 2) continue;
+    const weight = group.reduce((a, v) => a + v.sharpness, 0);
+    if (!best || weight > best.weight) {
+      const lags = group.map((v) => v.lag).sort((a, b) => a - b);
+      // 极性也按峰背比投票，别让一个弱段把符号带反
+      const signWeight = group.reduce((a, v) => a + v.sign * v.sharpness, 0);
+      // 精定位回到这组里峰背比最高的那一窗去做
+      const focus = group.reduce((a, v) => (v.sharpness > a.sharpness ? v : a), group[0]).start;
+      best = { lag: lags[Math.floor(lags.length / 2)], sign: signWeight >= 0 ? 1 : -1,
+               count: group.length, weight, focus };
     }
   }
   return best;
+}
+
+/**
+ * 把一段 8k 信号切成若干小段各自粗定位，每段投一票。
+ * 段长盯着 8 秒走（太短则 ±500ms 搜索范围吃掉大半重叠区），段数夹在 3–8。
+ */
+function segmentVotes(s8) {
+  const span = s8.n / 8000;
+  const segSec = Math.max(4, Math.min(8, span / 3));
+  const seg = Math.round(segSec * 8000);
+  if (seg <= 8000 || s8.n < seg) return [];
+
+  const MAX_VOTES = 16;
+  let hop = Math.max(1, Math.floor(seg / 2));
+  const after = s8.n - seg;
+  if (after / hop > MAX_VOTES - 1) hop = Math.max(1, Math.floor(after / (MAX_VOTES - 1)));
+
+  const starts = [];
+  for (let st = 0; st + seg <= s8.n; st += hop) starts.push(st);
+  if (!starts.length) return [];
+
+  const es = starts.map((st) => Math.min(energy(s8.L, st, st + seg), energy(s8.R, st, st + seg)));
+  const loudest = Math.max(...es);
+  const out = [];
+  starts.forEach((st, i) => {
+    if (es[i] < loudest * 0.02) return;
+    const c = coarseLag(s8.L.subarray(st, st + seg), s8.R.subarray(st, st + seg), 8000, 0.5);
+    out.push({ lag: c.lag, sign: c.sign, sharpness: c.sharpness, start: st });
+  });
+  return out;
 }
 
 /** 兜底：全片 8k 粗扫，挑出两条声道都有货的窗口，再在那儿重跑一次 */
