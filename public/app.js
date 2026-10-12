@@ -637,7 +637,7 @@ function copyParams() {
     (clipboard.align ? ` · 对轨 ${clipboard.align > 0 ? '+' : ''}${clipboard.align.toFixed(3)}ms` : '');
   note.classList.add('armed');
   $('pasteBtn').disabled = false;
-  toast('已复制甜点值 —— 选中其他素材后 ⌘V 应用');
+  toast('已复制甜点值 —— 选中其他素材后按 Ctrl/⌘V 应用');
 }
 
 function pasteParams() {
@@ -1285,10 +1285,10 @@ $('exportBtn').addEventListener('click', async () => {
         for (const pk of picked) if (pk.uploaded) delete state.files[pk.index]?.serverPath;
         $('progressText').textContent = '完成';
         const where = picked.some((p) => p.uploaded)
-          ? '已存到「影片 / VoicePad」'
+          ? '已存到用户视频目录下的 VoicePad 文件夹'
           : '已存到素材旁边（_voicepad 后缀）';
         toast(`导出完成，${where}`);
-        // 帮用户把成果在 Finder 里点出来，省得自己去找
+        // 在系统文件管理器里选中最后一个导出文件
         if (lastOutput) {
           fetch(`/api/reveal?path=${encodeURIComponent(lastOutput)}`, { method: 'POST' }).catch(() => {});
         }

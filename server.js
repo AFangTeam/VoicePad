@@ -28,10 +28,12 @@ import { tmpdir } from 'os';
 import { extname, join, resolve, basename, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { homedir } from 'os';
+import { platform } from 'process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PUBLIC = join(__dirname, 'public');
-const PORT = Number(process.env.PORT || 5178);
+// PORT=0 lets the macOS app request a free local port for its private server.
+const PORT = process.env.PORT === undefined ? 5178 : Number(process.env.PORT);
 
 // 拖放进来的文件浏览器不给绝对路径（`File.path` 是 Electron 才有的），
 // 所以只能先上传到这里，再由 ffmpeg 就地处理。
@@ -40,7 +42,7 @@ const UPLOAD_DIR = join(tmpdir(), 'voicepad-uploads');
 // 导出统一到 48k：EQ 系数和对轨采样数都按这个率算，预览和导出才落在同一网格
 const ALIGN_RATE = 48000;
 // 上传来的素材没有"源文件夹"可言，导出统一落这里
-const DROP_OUTPUT_DIR = join(homedir(), 'Movies', 'VoicePad');
+const DROP_OUTPUT_DIR = join(homedir(), platform === 'darwin' ? 'Movies' : 'Videos', 'VoicePad');
 
 const VIDEO_EXT = new Set(['.mp4', '.mov', '.m4v', '.mkv', '.avi', '.mts', '.m2ts', '.webm']);
 const MIME = {
@@ -53,7 +55,12 @@ const MIME = {
 
 // ── 工具 ────────────────────────────────────────────────────
 
-const expand = (p) => (p.startsWith('~') ? join(homedir(), p.slice(1)) : p);
+const expand = (p) => {
+  // Windows “Copy as path” often includes quotes; accept those in folder mode.
+  const clean = p.trim().replace(/^("(.*)"|'(.*)')$/, (_, _quoted, double, single) => double ?? single);
+  if (clean === '~') return homedir();
+  return /^~[\\/]/.test(clean) ? join(homedir(), clean.slice(2)) : clean;
+};
 
 function json(res, code, body) {
   const data = JSON.stringify(body);
@@ -176,10 +183,9 @@ async function exportOne(input, filter, onProgress, opts = {}) {
       '-map', '0:v:0', '-map', '0:a:0?',
       '-c:v', 'copy',
       // 单声道素材也要能用 pan=stereo，先统一升成立体声
-      '-af', `aformat=channel_layouts=stereo,${filter}`,
-      // ⚠️ 统一重采样到 48k。滤镜系数是客户端按 48k 算好的 RBJ 系数，
-      // 直接丢给 44.1k 的素材跑，所有转折频率都会偏 8.8%（3.2k 会落到 2.94k）。
-      // 对轨的 adelay 也按采样计数，同样要求两边同一个采样率。
+      '-af', `aresample=48000,aformat=channel_layouts=stereo,${filter}`,
+      // 滤镜链开头先重采样到 48k。仅设置输出 -ar 会在 biquad 之后重采样，
+      // 44.1k 素材仍会用错系数和对轨采样数。
       '-c:a', 'aac', '-b:a', '256k', '-ar', '48000',
       // mov/mp4 把索引挪到头部，边下边播更友好
       '-movflags', '+faststart',
@@ -197,7 +203,7 @@ async function exportOne(input, filter, onProgress, opts = {}) {
       if (code === 0) ok(out);
       else fail(new Error(stderr.trim().split('\n').pop() || `ffmpeg 退出码 ${code}`));
     });
-    ff.on('error', () => fail(new Error('找不到 ffmpeg。请先安装：brew install ffmpeg')));
+    ff.on('error', () => fail(new Error('找不到 ffmpeg。请安装 ffmpeg，并将其加入 PATH')));
   });
 }
 
@@ -230,7 +236,7 @@ async function handleExport(req, res) {
       const out = await exportOne(f.path, f.filter || filter, (sec) => {
         send({ type: 'progress', index: i, seconds: sec, duration: f.duration || null });
       }, {
-        // 上传来的素材没有源文件夹，统一落 ~/Movies/VoicePad
+        // 上传来的素材没有源文件夹，统一落用户的视频目录下
         outDir: f.uploaded ? DROP_OUTPUT_DIR : undefined,
         displayName: f.name,
       });
@@ -773,6 +779,18 @@ function serveStatic(res, urlPath) {
 }
 
 const server = createServer(async (req, res) => {
+  // A browser on another site must not drive this local file-processing API.
+  // The Host check also rejects DNS rebinding names pointed at 127.0.0.1.
+  const host = (req.headers.host || '').toLowerCase();
+  const port = server.address()?.port;
+  if (host !== `localhost:${port}` && host !== `127.0.0.1:${port}`) {
+    return json(res, 403, { error: '只接受本机请求' });
+  }
+  const origin = req.headers.origin;
+  if ((origin && origin.toLowerCase() !== `http://${host}`) ||
+      req.headers['sec-fetch-site'] === 'cross-site') {
+    return json(res, 403, { error: '不接受来自其他网页的请求' });
+  }
   const url = new URL(req.url, `http://localhost:${PORT}`);
 
   try {
@@ -822,7 +840,11 @@ const server = createServer(async (req, res) => {
     }
     if (url.pathname === '/api/reveal' && req.method === 'POST') {
       const p = url.searchParams.get('path');
-      if (p && existsSync(p)) execFile('open', ['-R', p], () => {});
+      if (p && existsSync(p)) {
+        if (platform === 'darwin') execFile('open', ['-R', p], () => {});
+        else if (platform === 'win32') execFile('explorer.exe', ['/select,', p], () => {});
+        else execFile('xdg-open', [dirname(p)], () => {});
+      }
       return json(res, 200, { ok: true });
     }
     if (url.pathname === '/api/export' && req.method === 'POST') {
@@ -842,6 +864,6 @@ try {
 } catch { /* 忽略 */ }
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`\n  VoicePad  →  http://localhost:${PORT}\n`);
+  console.log(`\n  VoicePad  →  http://localhost:${server.address().port}\n`);
   console.log('  只监听 127.0.0.1，不对外网开放。Ctrl+C 停止。\n');
 });
